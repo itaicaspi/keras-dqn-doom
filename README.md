@@ -4,11 +4,11 @@
 
 [![Demo CountPages alpha](https://j.gifs.com/5yGJ3Z.gif)](https://youtu.be/vnFHonjWoHE)
 
-Average return over 10000 episodes
+Average return over 30000 episodes
 
 ![model](avg_return.png)
 
-Maximum estimated Q value over 10000 episodes
+Maximum estimated Q value over 30000 episodes
 
 ![model](max_Q.png)
 
