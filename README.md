@@ -1,32 +1,35 @@
-# keras-dqn-doom - Deep Reinforcement Learning in Keras and ViZDoom
+# Deep Reinforcement Learning in Keras and ViZDoom
 
-Two models were implemented - DQN and Double DQN
+Implementation of deep reinforcement learning algorithm on the Doom environment
+
+The features that were implemented are:
+- DQN
+- Double DQN
+- Prioritized Experience Replay
+
+trained models are also supplied
 
 ## Results
 
 [![Demo CountPages alpha](https://j.gifs.com/5yGJ3Z.gif)](https://youtu.be/vnFHonjWoHE)
 
-## DQN training process
+## Basic Level DQN training process
 
 Average return over 10000 episodes
 
-![model](dqn_avg_return.png)
+![model](basic_dqn_avg_return.png)
 
-Mean estimated Q value over 10000 episodes
-
-![model](dqn_mean_Q.png)
-
-
-## DDQN training process
+## Basic Level DDQN training process
 
 Average return over 10000 episodes
 
-![model](ddqn_avg_return.png)
+![model](basic_ddqn_avg_return.png)
 
-Mean estimated Q value over 10000 episodes
+## Health Gathering Level DDQN training process
 
-![model](ddqn_mean_Q.png)
+Average return over 500 episodes
 
+![model](health_gathering_ddqn_avg_return.png)
 
 ## Author
 
