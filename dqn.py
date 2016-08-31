@@ -36,26 +36,38 @@ class Environment(object):
 
 class Agent(object):
     def __init__(self, discount):
-        self.discount = discount
+        # e-greedy policy
         self.epsilon_annealing = 2e4
         self.epsilon_start = 0.7
         self.epsilon_end = 0.05
         self.epsilon = self.epsilon_start
+
+        # initialization
         self.environment = Environment()
         self.memory = ExperienceReplay()
         self.preprocessed_curr = []
         self.win_count = 0
-        self.batch_size = 10
+        self.curr_step = 0
+
+        # training
+        self.discount = discount
         self.state_stack = 4
-        # model
         self.learning_rate = 1e-4
-        self.model = Sequential()
-        self.model.add(Convolution2D(16, 5, 5, subsample=(2,2), activation='relu', input_shape=(self.state_stack,120,160), init='uniform'))
-        self.model.add(Convolution2D(32, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
-        self.model.add(Convolution2D(64, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
-        self.model.add(Flatten())
-        self.model.add(Dense(len(self.environment.actions),init='uniform'))
-        self.model.compile(adam(lr=self.learning_rate), "mse")
+        self.batch_size = 10
+        self.target_update_freq = 500
+        self.target_network = self.create_network()
+        self.online_network = self.create_network()
+        self.algorithm = 'DQN'
+
+    def create_network(self):
+        model = Sequential()
+        model.add(Convolution2D(16, 5, 5, subsample=(2,2), activation='relu', input_shape=(self.state_stack,120,160), init='uniform'))
+        model.add(Convolution2D(32, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
+        model.add(Convolution2D(64, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
+        model.add(Flatten())
+        model.add(Dense(len(self.environment.actions),init='uniform'))
+        model.compile(adam(lr=self.learning_rate), "mse")
+        return model
 
     def preprocess(self, state):
         return scipy.misc.imresize(state[0], 0.5)
@@ -65,13 +77,17 @@ class Agent(object):
         inputs = list()
         for transition, game_over in minibatch:
             inputs.append(transition.preprocessed_curr[0])
-            target = self.model.predict(transition.preprocessed_curr)[0]
+            target = self.online_network.predict(transition.preprocessed_curr)[0]
             if game_over:
                 target[transition.action] = transition.reward
             else:
-                Q_sa = self.model.predict(transition.preprocessed_next)
-                target[transition.action] = transition.reward + self.discount * np.max(Q_sa)
-            #print(target)
+                if self.algorithm == 'DQN':
+                    Q_sa = self.target_network.predict(transition.preprocessed_next)
+                    target[transition.action] = transition.reward + self.discount * np.max(Q_sa)
+                elif self.algorithm == 'DDQN':
+                    best_next_action = np.argmax(self.online_network.predict(transition.preprocessed_next))
+                    Q_sa = self.target_network.predict(transition.preprocessed_next)[0][best_next_action]
+                    target[transition.action] = transition.reward + self.discount * Q_sa
             targets.append(target)
         return np.array(inputs), np.array(targets)
 
@@ -85,7 +101,7 @@ class Agent(object):
             self.preprocessed_curr = np.reshape(self.preprocessed_curr, (1, self.state_stack, 120, 160))
 
         # choose action
-        Q = self.model.predict(self.preprocessed_curr, batch_size=1)
+        Q = self.online_network.predict(self.preprocessed_curr, batch_size=1)
         coin_toss = np.random.rand(1)[0]
         if coin_toss > self.epsilon:
             action_idx = np.argmax(Q)
@@ -123,13 +139,18 @@ class Agent(object):
         self.memory.remember(Transition(self.preprocessed_curr, action_idx, reward, preprocessed_next), game_over)
 
         self.preprocessed_curr = preprocessed_next
+        self.curr_step += 1
 
-        return reward, np.max(Q), game_over
+        # copy online network to target network
+        if self.curr_step % self.target_update_freq == 0:
+            self.target_network.set_weights(self.online_network.get_weights())
+
+        return reward, np.mean(Q), game_over
 
     def train(self):
         minibatch = self.memory.sample_minibatch(self.batch_size)
         inputs, targets = self.get_inputs_and_targets(minibatch)
-        return self.model.train_on_batch(inputs, targets)
+        return self.online_network.train_on_batch(inputs, targets)
 
 
 class Transition(object):
@@ -190,8 +211,10 @@ for i in range(episodes):
     returns += [average_return]
 
     if i % 10000 == 0:
+        agent.target_network.save_weights('dqn_model_' + str(i) + '.h5')
+
+        # plt.ion()
         plt.plot(range(len(returns)), returns)
-        #plt.ion()
         plt.show()
 
         plt.plot(range(len(Qs)), Qs)
