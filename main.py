@@ -13,8 +13,8 @@ import datetime
 class Environment(object):
     def __init__(self):
         self.game = DoomGame()
-        #self.game.load_config("basic.cfg")
-        self.game.load_config("health_gathering.cfg")
+        #self.game.load_config("configs/basic.cfg")
+        self.game.load_config("configs/health_gathering.cfg")
         self.game.init()
         self.actions_num = self.game.get_available_buttons_size()
         self.actions = []
