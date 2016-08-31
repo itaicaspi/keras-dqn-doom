@@ -21,19 +21,19 @@ trained models are also supplied
 
 Average return over 10000 episodes
 
-![model](basic_dqn_avg_return.png)
+![model](assets/basic_dqn_avg_return.png)
 
 ## Basic Level DDQN training process
 
 Average return over 10000 episodes
 
-![model](basic_ddqn_avg_return.png)
+![model](assets/basic_ddqn_avg_return.png)
 
 ## Health Gathering Level DDQN training process
 
 Average return over 500 episodes
 
-![model](health_gathering_ddqn_avg_return.png)
+![model](assets/health_gathering_ddqn_avg_return.png)
 
 ## Author
 
