@@ -13,6 +13,10 @@ trained models are also supplied
 
 [![Demo CountPages alpha](https://j.gifs.com/5yGJ3Z.gif)](https://youtu.be/vnFHonjWoHE)
 
+
+[![Demo CountPages alpha](https://j.gifs.com/gJoLyj.gif)](https://youtu.be/Bvery9W-WQI)
+
+
 ## Basic Level DQN training process
 
 Average return over 10000 episodes
