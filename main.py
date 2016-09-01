@@ -13,8 +13,8 @@ import datetime
 class Environment(object):
     def __init__(self):
         self.game = DoomGame()
-        #self.game.load_config("configs/basic.cfg")
-        self.game.load_config("configs/health_gathering.cfg")
+        self.game.load_config("configs/basic.cfg")
+        #self.game.load_config("configs/health_gathering.cfg")
         self.game.init()
         self.actions_num = self.game.get_available_buttons_size()
         self.actions = []
@@ -40,7 +40,7 @@ class Environment(object):
 
 
 class Agent(object):
-    def __init__(self, discount, algorithm='DDQN', prioritized_experience=False, snapshot=''):
+    def __init__(self, discount, algorithm='DDQN', prioritized_experience=True, snapshot='', max_memory=1000):
         # e-greedy policy
         self.epsilon_annealing = 3e4 #steps
         self.epsilon_start = 0.7
@@ -49,7 +49,7 @@ class Agent(object):
 
         # initialization
         self.environment = Environment()
-        self.memory = ExperienceReplay(prioritized=prioritized_experience)
+        self.memory = ExperienceReplay(max_memory=max_memory, prioritized=prioritized_experience)
         self.preprocessed_curr = []
         self.win_count = 0
         self.curr_step = 0
@@ -57,7 +57,7 @@ class Agent(object):
         # training
         self.discount = discount
         self.state_stack = 4
-        self.learning_rate = 1e-4
+        self.learning_rate = 2.5e-4
         self.batch_size = 10
         self.target_update_freq = 500
         self.target_network = self.create_network()
@@ -196,17 +196,18 @@ class ExperienceReplay(object):
         self.alpha = 0.6 # prioritization factor
         self.beta_start = 0.4
         self.beta_end = 1
-        self.beta = self.beta0
+        self.beta = self.beta_end
         self.sum_powered_priorities = 0 # sum p^alpha
         self.memory = list()
 
     def remember(self, transition, game_over):
         # set the priority to the maximum current priority
-        transition_priority = 0
+        transition_powered_priority = 1e-7 ** self.alpha
         if self.memory != []:
-            transition_priority = np.max(self.memory,0)[2]
+            transition_powered_priority = np.max(self.memory,0)[2]
+        self.sum_powered_priorities += transition_powered_priority
         # store transition and clean up memory if necessary
-        self.memory.append([transition, game_over, transition_priority])
+        self.memory.append([transition, game_over, transition_powered_priority])
         if len(self.memory) > self.max_memory:
             self.sum_powered_priorities -= self.memory[0][2]
             del self.memory[0]
@@ -221,7 +222,7 @@ class ExperienceReplay(object):
 
             indices = []
             for p in probs:
-                for idx, threshold in zip(range(thresholds), thresholds):
+                for idx, threshold in zip(range(len(thresholds)), thresholds):
                     if p < threshold:
                         indices += [idx]
                         break
@@ -232,10 +233,11 @@ class ExperienceReplay(object):
             weight = 0
             if self.prioritized:
                 weight = self.get_transition_weight(idx)
-            minibatch.append([idx] + self.memory[idx][0:1] + [weight]) # idx, transition, game_over, weight
+            minibatch.append([idx] + self.memory[idx][0:2] + [weight]) # idx, transition, game_over, weight
+
         if self.prioritized:
             max_weight = np.max(minibatch,0)[3]
-            for idx in indices:
+            for idx in range(len(minibatch)):
                 minibatch[idx][3] /= float(max_weight) # normalize weights relative to the minibatch
         return minibatch
 
@@ -251,16 +253,17 @@ class ExperienceReplay(object):
         return importance
 
     def get_transition_weight(self, transition_idx):
-        weight = 1/(self.get_transition_importance(transition_idx)*self.max_memory)**self.beta
+        weight = 1/float(self.get_transition_importance(transition_idx)*self.max_memory)**self.beta
         return weight
 
 
 # params
 plot_results_episodes = 100
 episodes = 1000000
-steps_per_episode = 300
+steps_per_episode = 40
 average_over_num_episodes = 100
-agent = Agent(discount=0.99, snapshot='')
+start_learning_after = 30
+agent = Agent(discount=0.99, snapshot='', max_memory=1000)
 
 # initialize
 total_steps = 0
@@ -278,7 +281,7 @@ for i in range(episodes):
         steps += 1
         curr_return += reward
         Qs += [mean_Q]
-        if i > 30:
+        if i > start_learning_after:
             loss += agent.train()
 
     average_return = (1-1/float(average_over_num_episodes))*average_return+(1/float(average_over_num_episodes))*curr_return
