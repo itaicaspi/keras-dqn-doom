@@ -23,15 +23,15 @@ DDQN runs:
 State prediction:
 
 actual:
-![model](assets/state1_actual.png)
+![model](assets/state1_actual.jpg)
 predicted:
-![model](assets/state1_predicted.png)
+![model](assets/state1_predicted.jpg)
 
 
 actual:
-![model](assets/state2_actual.png)
+![model](assets/state2_actual.jpg)
 predicted:
-![model](assets/state2_predicted.png)
+![model](assets/state2_predicted.jpg)
 
 
 ## DQN
