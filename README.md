@@ -7,6 +7,7 @@ The features that were implemented are:
 - Double DQN
 - Prioritized Experience Replay
 - Next state prediction (WIP)
+- e-greedy, softmax or shifted multinomial exploration policies
 
 trained models are also supplied
 
