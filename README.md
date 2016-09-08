@@ -7,7 +7,7 @@ The features that were implemented are:
 - Double DQN
 - Prioritized Experience Replay
 - Next state prediction (WIP)
-- e-greedy, softmax or shifted multinomial exploration policies
+- Exploration policies: e-greedy, softmax or shifted multinomial
 
 trained models are also supplied
 
@@ -21,18 +21,35 @@ DDQN runs:
 [![Demo CountPages alpha](https://j.gifs.com/gJoLyj.gif)](https://youtu.be/Bvery9W-WQI)
 
 
+
 State prediction:
 
 actual:
+
 ![model](assets/state1_actual.jpg)
+
 predicted:
+
 ![model](assets/state1_predicted.jpg)
 
 
 actual:
+
 ![model](assets/state2_actual.jpg)
+
 predicted:
+
 ![model](assets/state2_predicted.jpg)
+
+
+
+Exploration policies:
+
+Tested on health gathering level for 1000 episodes
+
+red - softmax, green - shifted multinomial, blue - e-greedy
+
+![model](assets/health_exploration_return.png)
 
 
 ## DQN
