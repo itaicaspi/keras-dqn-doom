@@ -81,6 +81,15 @@ uses an Autoencoder integrated into a Generative Adverserial Network
 
 Reference: https://sites.google.com/a/umich.edu/junhyuk-oh/action-conditional-video-prediction
 
+## Exploration policies
+
+**e-Greedy** - Choose an epsilon and choose a random number. If the number is greater than epsilon, choose the max value action. Otherwise, choose a random action.
+
+**Softmax** - Choose a random number and select the action by a multinomial probability ordered by prob(a) = e^(Q(a)/temp)/sum(e^(Q(a)/temp)).
+
+**Shifted Multinomial** - Similiar to softmax but chooses the action by the order shifted_Q(a) = Q(a)-min(avg(min(Q(a)), min(Q(a))). prob(a) = shifted_Q(a)/sum(shifted_Q(a)). 
+
+
 ## Basic Level DQN training process
 
 Average return over 10000 episodes
