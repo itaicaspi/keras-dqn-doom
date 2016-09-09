@@ -1,5 +1,5 @@
 import numpy as np
-from keras.models import Sequential
+from keras.models import Sequential, load_model
 from keras.layers import Convolution2D, Dense, Flatten
 from keras.optimizers import adam
 from keras.initializations import uniform
@@ -105,12 +105,15 @@ class Agent(object):
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.target_update_freq = 500
-        self.target_network = self.create_network()
-        self.online_network = self.create_network()
+
         self.algorithm = algorithm
         if snapshot != '':
-            self.target_network.load_weights(snapshot)
-            self.online_network.load_weights(snapshot)
+            print("loading snapshot " + str(snapshot))
+            self.target_network = load_model(snapshot)
+            self.online_network = load_model(snapshot)
+        else:
+            self.target_network = self.create_network()
+            self.online_network = self.create_network()
 
 
     def create_network(self):
@@ -399,7 +402,7 @@ def run_training(args):
         if i % args["snapshot_episodes"] == args["snapshot_episodes"] - 1:
             snapshot = 'model_' + str(i + 1) + '.h5'
             print(str(datetime.datetime.now()) + " >> saving snapshot to " + snapshot)
-            agent.target_network.save_weights(snapshot, overwrite=True)
+            agent.target_network.save(snapshot, overwrite=True)
 
     agent.environment.game.close()
     return returns, Qs
@@ -407,8 +410,8 @@ def run_training(args):
 
 if __name__ == "__main__":
     softmax = {
-        "snapshot_episodes": 200,
-        "episodes": 200,
+        "snapshot_episodes": 1000,
+        "episodes": 2000,
         "steps_per_episode": 40, # 4300 for deathmatch, 300 for health gathering
         "average_over_num_episodes": 50,
         "start_learning_after": 5,
@@ -423,8 +426,8 @@ if __name__ == "__main__":
         "temperature": 10,
         "batch_size": 10,
         "state_stack": 4,
-        "snapshot": '',
-        "train": True
+        "snapshot": 'model_1.h5',
+        "train": False
     }
     multinomial = softmax.copy()
     multinomial["exploration_policy"] = ExplorationPolicy.SHIFTED_MULTINOMIAL
