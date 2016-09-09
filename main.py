@@ -12,10 +12,13 @@ import datetime
 from enum import Enum
 
 
+image_height, image_width = 240, 320
+
 class Level(Enum):
     BASIC = "configs/basic.cfg"
     HEALTH = "configs/health_gathering.cfg"
     DEATHMATCH = "configs/deathmatch.cfg"
+    DEFEND = "configs/defend_the_center.cfg"
 
 class Algorithm(Enum):
     DQN = 1
@@ -27,12 +30,12 @@ class ExplorationPolicy(Enum):
     SHIFTED_MULTINOMIAL = 3
 
 class Environment(object):
-    def __init__(self, level = Level.BASIC):
+    def __init__(self, level = Level.BASIC, combine_actions = False):
         self.game = DoomGame()
         self.game.load_config(level.value)
         self.game.init()
         self.actions_num = self.game.get_available_buttons_size()
-        self.combine_actions = False
+        self.combine_actions = combine_actions
         self.actions = []
         if self.combine_actions:
             for perm in it.product([False, True], repeat=self.actions_num):
@@ -62,7 +65,8 @@ class Environment(object):
 
 
 class Agent(object):
-    def __init__(self, discount, algorithm=Algorithm.DDQN, prioritized_experience=True, snapshot='', max_memory=1000, exploration_policy=ExplorationPolicy.SHIFTED_MULTINOMIAL):
+    def __init__(self, discount, level, algorithm, prioritized_experience, max_memory, exploration_policy,
+                 learning_rate, state_stack, batch_size, combine_actions, temperature=10, snapshot=''):
         """
 
         :param discount:
@@ -80,22 +84,26 @@ class Agent(object):
 
         # softmax / multinomial policy
         self.average_minimum = 0 # for multinomial policy
-        self.temperature = 0.5
+        self.temperature = temperature
 
         self.policy = exploration_policy
 
         # initialization
-        self.environment = Environment()
+        self.environment = Environment(level=level, combine_actions=combine_actions)
         self.memory = ExperienceReplay(max_memory=max_memory, prioritized=prioritized_experience)
         self.preprocessed_curr = []
         self.win_count = 0
         self.curr_step = 0
 
+        self.state_width = 320
+        self.state_height = 240
+        self.scale = self.environment.screen_width / float(self.state_width)
+
         # training
         self.discount = discount
-        self.state_stack = 4
-        self.learning_rate = 2.5e-4
-        self.batch_size = 10
+        self.state_stack = state_stack
+        self.learning_rate = learning_rate
+        self.batch_size = batch_size
         self.target_update_freq = 500
         self.target_network = self.create_network()
         self.online_network = self.create_network()
@@ -107,7 +115,7 @@ class Agent(object):
 
     def create_network(self):
         model = Sequential()
-        model.add(Convolution2D(16, 5, 5, subsample=(2,2), activation='relu', input_shape=(self.state_stack,120,160), init='uniform'))
+        model.add(Convolution2D(16, 5, 5, subsample=(2,2), activation='relu', input_shape=(self.state_stack,image_height, image_width), init='uniform'))
         model.add(Convolution2D(32, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
         model.add(Convolution2D(64, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
         model.add(Flatten())
@@ -116,7 +124,11 @@ class Agent(object):
         return model
 
     def preprocess(self, state):
-        return scipy.misc.imresize(state[0], 0.5)
+        # resize image and convert to greyscale
+        if self.scale == 1:
+            return np.mean(state,0)
+        else:
+            return scipy.misc.imresize(np.mean(state,0), self.scale)
 
     def get_inputs_and_targets(self, minibatch):
         targets = list()
@@ -150,7 +162,7 @@ class Agent(object):
 
     def softmax_selection(self, Q):
         # compute thresholds and choose a random number
-        exp_Q = np.array(np.exp(Q)/float(self.temperature), copy=True)
+        exp_Q = np.array(np.exp(Q/float(self.temperature)), copy=True)
         prob = np.random.rand(1)
         importances = [action_value/float(np.sum(exp_Q)) for action_value in exp_Q]
         thresholds = np.cumsum(importances)
@@ -159,6 +171,7 @@ class Agent(object):
             if prob < threshold:
                 action = self.environment.actions[action_idx]
                 return action, action_idx
+        return self.environment.actions[len(exp_Q)-1], len(exp_Q)-1
 
     def shifted_multinomial_selection(self, Q):
         # Q values are shifted so that we won't have negative values
@@ -193,13 +206,15 @@ class Agent(object):
         # if no current state is present, create one by stacking the duplicated current state
         if self.preprocessed_curr == []:
             self.preprocessed_curr = list()
+            curr_state = self.environment.get_curr_state()
             sub_state = self.preprocess(self.environment.get_curr_state())
             for t in range(self.state_stack):
                 self.preprocessed_curr.append(sub_state)
-            self.preprocessed_curr = np.reshape(self.preprocessed_curr, (1, self.state_stack, 120, 160))
+            self.preprocessed_curr = np.reshape(self.preprocessed_curr, (1, self.state_stack, image_height, image_width))
 
         # choose action
         Q = self.online_network.predict(self.preprocessed_curr, batch_size=1)
+
         if self.policy == ExplorationPolicy.E_GREEDY:
             action, action_idx = self.e_greedy(Q)
         elif self.policy == ExplorationPolicy.SHIFTED_MULTINOMIAL:
@@ -222,7 +237,7 @@ class Agent(object):
 
         # episode finished
         if not game_over:
-            preprocessed_next = np.reshape(preprocessed_next, (1, self.state_stack, 120, 160))
+            preprocessed_next = np.reshape(preprocessed_next, (1, self.state_stack, image_height, image_width))
         else:
             preprocessed_next = []
             self.environment.new_episode()
@@ -330,56 +345,111 @@ class ExperienceReplay(object):
         return weight
 
 
-if __name__ == "__main__":
-    # params
-    plot_results_episodes = 1000
-    episodes = 1000000
-    steps_per_episode = 40 # 4300 for deathmatch, 300 for health gathering
-    average_over_num_episodes = 100
-    start_learning_after = 5
-    agent = Agent(algorithm=Algorithm.DDQN, discount=0.99, snapshot='', max_memory=50000,
-                  prioritized_experience=False, exploration_policy=ExplorationPolicy.SHIFTED_MULTINOMIAL)
+def run_training(args):
+
+    agent = Agent(algorithm=args["algorithm"],
+                  discount=args["discount"],
+                  snapshot=args["snapshot"],
+                  max_memory=args["max_memory"],
+                  prioritized_experience=args["prioritized_experience"],
+                  exploration_policy=args["exploration_policy"],
+                  learning_rate=args["learning_rate"],
+                  level=args["level"],
+                  state_stack=args["state_stack"],
+                  batch_size=args["batch_size"],
+                  temperature=args["temperature"],
+                  combine_actions=args["combine_actions"])
 
     # initialize
     total_steps = 0
     average_return = 0
+    average_Q = 0
     returns = []
     Qs = []
-    for i in range(episodes):
+    for i in range(args["episodes"]):
         agent.environment.new_episode()
         steps = 0
         curr_return = 0
+        curr_Qs = 0
         loss = 0
         game_over = False
-        while not game_over and steps < steps_per_episode:
+        while not game_over and steps < args["steps_per_episode"]:
             reward, mean_Q, game_over = agent.step()
             steps += 1
             curr_return += reward
-            Qs += [mean_Q]
-            if i > start_learning_after:
+            curr_Qs += mean_Q
+
+            if i > args["start_learning_after"] and args["train"] == True:
                 loss += agent.train()
 
-        average_return = (1-1/float(average_over_num_episodes))*average_return+(1/float(average_over_num_episodes))*curr_return
+        n = float(args["average_over_num_episodes"])
+        average_Q = (1-1/n) * average_Q + (1/n) * curr_Qs/float(steps)
+        average_return = (1-1/n) * average_return + (1/n) * curr_return
         total_steps += steps
 
-
+        print("")
         print(str(datetime.datetime.now()))
         print("episode = " + str(i) + " steps = " + str(total_steps))
         print("epsilon = " + str(agent.epsilon) + " loss = " + str(loss))
-        print("wins = " + str(agent.win_count) + " current_return = " + str(curr_return) + " average return = " + str(average_return))
+        print("current_return = " + str(curr_return) + " average return = " + str(average_return))
 
         returns += [average_return]
+        Qs += [average_Q]
 
-        if i % plot_results_episodes == plot_results_episodes-1:
-            snapshot = 'death_match_dqn_model_' + str(i+1) + '.h5'
+        if i % args["snapshot_episodes"] == args["snapshot_episodes"] - 1:
+            snapshot = 'model_' + str(i + 1) + '.h5'
             print(str(datetime.datetime.now()) + " >> saving snapshot to " + snapshot)
             agent.target_network.save_weights(snapshot, overwrite=True)
 
-            # plt.ion()
-            plt.plot(range(len(returns)), returns)
-            plt.show()
-
-            plt.plot(range(len(Qs)), Qs)
-            plt.show()
-
     agent.environment.game.close()
+    return returns, Qs
+
+
+if __name__ == "__main__":
+    softmax = {
+        "snapshot_episodes": 200,
+        "episodes": 200,
+        "steps_per_episode": 40, # 4300 for deathmatch, 300 for health gathering
+        "average_over_num_episodes": 50,
+        "start_learning_after": 5,
+        "algorithm": Algorithm.DDQN,
+        "discount": 0.99,
+        "max_memory": 10000,
+        "prioritized_experience": False,
+        "exploration_policy": ExplorationPolicy.SOFTMAX,
+        "learning_rate": 2.5e-4,
+        "level": Level.DEFEND,
+        "combine_actions": True,
+        "temperature": 10,
+        "batch_size": 10,
+        "state_stack": 4,
+        "snapshot": '',
+        "train": True
+    }
+    multinomial = softmax.copy()
+    multinomial["exploration_policy"] = ExplorationPolicy.SHIFTED_MULTINOMIAL
+
+    egreedy = softmax.copy()
+    egreedy["exploration_policy"] = ExplorationPolicy.E_GREEDY
+
+    runs = [softmax, multinomial, egreedy]
+
+    colors = ["r", "g", "b"]
+    for color, run in zip(colors, runs):
+        # run agent
+        returns, Qs = run_training(run)
+
+        # plot results
+        plt.figure(1)
+        plt.plot(range(len(returns)), returns, color)
+        plt.xlabel("episode")
+        plt.ylabel("average return")
+        plt.title("Average Return")
+
+        plt.figure(2)
+        plt.plot(range(len(Qs)), Qs, color)
+        plt.xlabel("episode")
+        plt.ylabel("mean Q value")
+        plt.title("Mean Q Value")
+
+    plt.show()
