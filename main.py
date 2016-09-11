@@ -125,6 +125,8 @@ class Agent(object):
             print("loading snapshot " + str(snapshot))
             self.target_network = load_model(snapshot)
             self.online_network = load_model(snapshot)
+            self.target_network.compile(adam(lr=self.learning_rate), "mse")
+            self.online_network.compile(adam(lr=self.learning_rate), "mse")
         else:
             self.target_network = self.create_network()
             self.online_network = self.create_network()
@@ -630,108 +632,110 @@ def run_experiment(args):
 
 
 if __name__ == "__main__":
-    # multi agent entity
+    experiment = "multi_agent" # TODO: create a better way for this
 
-    aiming_agent = {
-        "algorithm": Algorithm.DDQN,
-        "discount": 0.99,
-        "max_memory": 10000,
-        "prioritized_experience": False,
-        "exploration_policy": ExplorationPolicy.E_GREEDY,
-        "learning_rate": 2.5e-4,
-        "level": Level.DEFEND,
-        "combine_actions": True,
-        "temperature": 10,
-        "batch_size": 10,
-        "state_stack": 4,
-        "snapshot": 'model_1500.h5',
-        "mode": Mode.TRAIN
-    }
+    if experiment == "multi_agent":
+        # multi agent entity
 
-    exploring_agent = {
-        "algorithm": Algorithm.DDQN,
-        "discount": 0.99,
-        "max_memory": 10000,
-        "prioritized_experience": False,
-        "exploration_policy": ExplorationPolicy.E_GREEDY,
-        "learning_rate": 2.5e-4,
-        "level": Level.HEALTH,
-        "combine_actions": True,
-        "temperature": 10,
-        "batch_size": 10,
-        "state_stack": 4,
-        "snapshot": '',
-        "mode": Mode.TRAIN
-    }
+        aiming_agent = {
+            "algorithm": Algorithm.DDQN,
+            "discount": 0.99,
+            "max_memory": 10000,
+            "prioritized_experience": False,
+            "exploration_policy": ExplorationPolicy.E_GREEDY,
+            "learning_rate": 2.5e-4,
+            "level": Level.DEFEND,
+            "combine_actions": True,
+            "temperature": 10,
+            "batch_size": 10,
+            "state_stack": 4,
+            "snapshot": 'defend_model_1000.h5',
+            "mode": Mode.TRAIN
+        }
 
-    entity_args = {
-        "snapshot_episodes": 1000,
-        "episodes": 2000,
-        "steps_per_episode": 4000,  # 4300 for deathmatch, 300 for health gathering
-        "average_over_num_episodes": 50,
-        "start_learning_after": 5,
-        "mode": Mode.TRAIN,
-        "state_stack": 4,
-        "level": Level.DEATHMATCH,
-        "combine_actions": True
-    }
+        exploring_agent = {
+            "algorithm": Algorithm.DDQN,
+            "discount": 0.99,
+            "max_memory": 10000,
+            "prioritized_experience": False,
+            "exploration_policy": ExplorationPolicy.E_GREEDY,
+            "learning_rate": 2.5e-4,
+            "level": Level.HEALTH,
+            "combine_actions": True,
+            "temperature": 10,
+            "batch_size": 10,
+            "state_stack": 4,
+            "snapshot": 'health_model_500.h5',
+            "mode": Mode.TRAIN
+        }
 
-    entity = Entity([aiming_agent, exploring_agent], entity_args)
-    returns = entity.run()
+        entity_args = {
+            "snapshot_episodes": 1000,
+            "episodes": 2000,
+            "steps_per_episode": 4000,  # 4300 for deathmatch, 300 for health gathering
+            "average_over_num_episodes": 50,
+            "start_learning_after": 5,
+            "mode": Mode.TRAIN,
+            "state_stack": 4,
+            "level": Level.DEATHMATCH,
+            "combine_actions": True
+        }
 
-    plt.plot(range(len(returns)), returns, "r")
-    plt.xlabel("episode")
-    plt.ylabel("average return")
-    plt.title("Average Return")
+        entity = Entity([aiming_agent, exploring_agent], entity_args)
+        returns = entity.run()
 
-    """
-    softmax = {
-        "snapshot_episodes": 1000,
-        "episodes": 2000,
-        "steps_per_episode": 4000, # 4300 for deathmatch, 300 for health gathering
-        "average_over_num_episodes": 50,
-        "start_learning_after": 5,
-        "algorithm": Algorithm.DDQN,
-        "discount": 0.99,
-        "max_memory": 10000,
-        "prioritized_experience": False,
-        "exploration_policy": ExplorationPolicy.SOFTMAX,
-        "learning_rate": 2.5e-4,
-        "level": Level.WAY_HOME,
-        "combine_actions": True,
-        "temperature": 10,
-        "batch_size": 10,
-        "state_stack": 4,
-        "snapshot": '',
-        "mode": Mode.TRAIN
-    }
-
-    multinomial = softmax.copy()
-    multinomial["exploration_policy"] = ExplorationPolicy.SHIFTED_MULTINOMIAL
-
-    egreedy = softmax.copy()
-    egreedy["exploration_policy"] = ExplorationPolicy.E_GREEDY
-
-    runs = [softmax, multinomial, egreedy]
-    runs = [egreedy]
-
-    colors = ["r", "g", "b"]
-    for color, run in zip(colors, runs):
-        # run agent
-        returns, Qs = run_experiment(run)
-
-        # plot results
-        plt.figure(1)
-        plt.plot(range(len(returns)), returns, color)
+        plt.plot(range(len(returns)), returns, "r")
         plt.xlabel("episode")
         plt.ylabel("average return")
         plt.title("Average Return")
 
-        plt.figure(2)
-        plt.plot(range(len(Qs)), Qs, color)
-        plt.xlabel("episode")
-        plt.ylabel("mean Q value")
-        plt.title("Mean Q Value")
+    elif experiment == "single_agent":
+        softmax = {
+            "snapshot_episodes": 1000,
+            "episodes": 2000,
+            "steps_per_episode": 4000, # 4300 for deathmatch, 300 for health gathering
+            "average_over_num_episodes": 50,
+            "start_learning_after": 5,
+            "algorithm": Algorithm.DDQN,
+            "discount": 0.99,
+            "max_memory": 10000,
+            "prioritized_experience": False,
+            "exploration_policy": ExplorationPolicy.SOFTMAX,
+            "learning_rate": 2.5e-4,
+            "level": Level.HEALTH,
+            "combine_actions": True,
+            "temperature": 10,
+            "batch_size": 10,
+            "state_stack": 4,
+            "snapshot": 'health_model_500.h5',
+            "mode": Mode.DISPLAY
+        }
 
-    plt.show()
-    """
+        multinomial = softmax.copy()
+        multinomial["exploration_policy"] = ExplorationPolicy.SHIFTED_MULTINOMIAL
+
+        egreedy = softmax.copy()
+        egreedy["exploration_policy"] = ExplorationPolicy.E_GREEDY
+
+        runs = [softmax, multinomial, egreedy]
+        runs = [egreedy]
+
+        colors = ["r", "g", "b"]
+        for color, run in zip(colors, runs):
+            # run agent
+            returns, Qs = run_experiment(run)
+
+            # plot results
+            plt.figure(1)
+            plt.plot(range(len(returns)), returns, color)
+            plt.xlabel("episode")
+            plt.ylabel("average return")
+            plt.title("Average Return")
+
+            plt.figure(2)
+            plt.plot(range(len(Qs)), Qs, color)
+            plt.xlabel("episode")
+            plt.ylabel("mean Q value")
+            plt.title("Mean Q Value")
+
+        plt.show()
