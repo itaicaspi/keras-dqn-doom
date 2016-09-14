@@ -1,6 +1,6 @@
 import numpy as np
-from keras.models import Sequential, load_model
-from keras.layers import Convolution2D, Dense, Flatten
+from keras.models import Sequential, load_model, Model
+from keras.layers import Convolution2D, Dense, Flatten, merge, MaxPooling2D, Input, AveragePooling2D
 from keras.optimizers import adam
 from keras.initializations import uniform
 from vizdoom import *
@@ -88,7 +88,7 @@ class Agent(object):
         self.trainable = train
 
         # e-greedy policy
-        self.epsilon_annealing_steps = 3e5 #steps
+        self.epsilon_annealing_steps = 1e4 #steps
         self.epsilon_start = 1
         self.epsilon_end = 0.1
         if self.trainable:
@@ -134,13 +134,39 @@ class Agent(object):
 
 
     def create_network(self):
-        model = Sequential()
-        model.add(Convolution2D(16, 5, 5, subsample=(2,2), activation='relu', input_shape=(self.history_length, image_height, image_width), init='uniform'))
-        model.add(Convolution2D(32, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
-        model.add(Convolution2D(64, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
-        model.add(Flatten())
-        model.add(Dense(len(self.environment.actions),init='uniform'))
-        model.compile(adam(lr=self.learning_rate), "mse")
+        inception = False
+
+        if inception:
+            input_img = Input(shape=(self.history_length, image_height, image_width))
+            tower_1 = Convolution2D(16, 1, 1, border_mode='same', activation='relu')(input_img)
+            tower_1 = Convolution2D(16, 3, 3, border_mode='same', activation='relu')(tower_1)
+            tower_2 = Convolution2D(16, 1, 1, border_mode='same', activation='relu')(input_img)
+            tower_2 = Convolution2D(16, 5, 5, border_mode='same', activation='relu')(tower_2)
+            tower_3 = MaxPooling2D((3, 3), strides=(1, 1), border_mode='same')(input_img)
+            tower_3 = Convolution2D(16, 1, 1, border_mode='same', activation='relu')(tower_3)
+            output1 = merge([tower_1, tower_2, tower_3], mode='concat', concat_axis=1)
+            maxpool = MaxPooling2D((3, 3), strides=(2, 2))(output1)
+            tower_11 = Convolution2D(32, 1, 1, border_mode='same', activation='relu')(maxpool)
+            tower_11 = Convolution2D(32, 3, 3, border_mode='same', activation='relu')(tower_11)
+            tower_22 = Convolution2D(32, 1, 1, border_mode='same', activation='relu')(maxpool)
+            tower_22 = Convolution2D(32, 5, 5, border_mode='same', activation='relu')(tower_22)
+            tower_33 = MaxPooling2D((3, 3), strides=(1, 1), border_mode='same')(maxpool)
+            tower_33 = Convolution2D(32, 1, 1, border_mode='same', activation='relu')(tower_33)
+            output2 = merge([tower_11, tower_22, tower_33], mode='concat', concat_axis=1)
+            avgpool = AveragePooling2D((7, 7), strides=(8, 8))(output2)
+            flatten = Flatten()(avgpool)
+            output = Dense(len(self.environment.actions))(flatten)
+            model = Model(input=input_img, output=output)
+            model.compile(adam(lr=self.learning_rate), "mse")
+        else:
+            model = Sequential()
+            model.add(Convolution2D(16, 5, 5, subsample=(2,2), activation='relu', input_shape=(self.history_length, image_height, image_width), init='uniform'))
+            model.add(Convolution2D(32, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
+            model.add(Convolution2D(64, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
+            model.add(Flatten())
+            model.add(Dense(len(self.environment.actions),init='uniform'))
+            model.compile(adam(lr=self.learning_rate), "mse")
+
         return model
 
     def preprocess(self, state):
@@ -723,7 +749,7 @@ if __name__ == "__main__":
             "snapshot": '',
             "mode": Mode.TRAIN,
             "skipped_frames": 4,
-            "target_update_freq": 3000,
+            "target_update_freq": 1000,
             "steps_between_train": 4
         }
 
