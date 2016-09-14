@@ -12,7 +12,7 @@ import datetime
 from enum import Enum
 
 
-image_height, image_width = 240, 320
+image_height, image_width = 120, 160
 
 class Mode(Enum):
     TRAIN = 1
@@ -73,8 +73,8 @@ class Environment(object):
 
 class Agent(object):
     def __init__(self, discount, level, algorithm, prioritized_experience, max_memory, exploration_policy,
-                 learning_rate, state_stack, batch_size, combine_actions, temperature=10, snapshot='', train=True,
-                 visible=True):
+                 learning_rate, history_length, batch_size, combine_actions, target_update_freq, temperature=10, snapshot='', train=True,
+                 visible=True, skipped_frames=4):
         """
 
         :param discount:
@@ -88,9 +88,9 @@ class Agent(object):
         self.trainable = train
 
         # e-greedy policy
-        self.epsilon_annealing = 3e4 #steps
-        self.epsilon_start = 0.7
-        self.epsilon_end = 0.05
+        self.epsilon_annealing_steps = 3e5 #steps
+        self.epsilon_start = 1
+        self.epsilon_end = 0.1
         if self.trainable:
             self.epsilon = self.epsilon_start
         else:
@@ -109,16 +109,17 @@ class Agent(object):
         self.win_count = 0
         self.curr_step = 0
 
-        self.state_width = 320
-        self.state_height = 240
-        self.scale = self.environment.screen_width / float(self.state_width)
+        self.state_width = 160
+        self.state_height = 120
+        self.scale = self.state_width / float(self.environment.screen_width)
 
         # training
         self.discount = discount
-        self.state_stack = state_stack
+        self.history_length = history_length
+        self.skipped_frames = skipped_frames
         self.learning_rate = learning_rate
         self.batch_size = batch_size
-        self.target_update_freq = 500
+        self.target_update_freq = target_update_freq
 
         self.algorithm = algorithm
         if snapshot != '':
@@ -134,7 +135,7 @@ class Agent(object):
 
     def create_network(self):
         model = Sequential()
-        model.add(Convolution2D(16, 5, 5, subsample=(2,2), activation='relu', input_shape=(self.state_stack,image_height, image_width), init='uniform'))
+        model.add(Convolution2D(16, 5, 5, subsample=(2,2), activation='relu', input_shape=(self.history_length, image_height, image_width), init='uniform'))
         model.add(Convolution2D(32, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
         model.add(Convolution2D(64, 3, 3, subsample=(2,2), activation='relu', init='uniform'))
         model.add(Flatten())
@@ -167,6 +168,7 @@ class Agent(object):
             if game_over:
                 target[transition.action] = transition.reward
             else:
+                # calculate TD-error
                 if self.algorithm == Algorithm.DQN:
                     Q_sa = self.target_network.predict(transition.preprocessed_next)
                     TD_error = transition.reward + self.discount * np.max(Q_sa) - target[transition.action]
@@ -237,7 +239,7 @@ class Agent(object):
 
         # anneal epsilon value
         if self.epsilon > self.epsilon_end:
-            self.epsilon -= float(self.epsilon_start - self.epsilon_end)/float(self.epsilon_annealing)
+            self.epsilon -= float(self.epsilon_start - self.epsilon_end)/float(self.epsilon_annealing_steps)
 
         return action, action_idx
 
@@ -249,14 +251,14 @@ class Agent(object):
         # if no current state is present, create one by stacking the duplicated current state
         if self.preprocessed_curr == []:
             self.preprocessed_curr = list()
-            curr_state = self.environment.get_curr_state()
-            sub_state = self.preprocess(curr_state)
-            for t in range(self.state_stack):
-                self.preprocessed_curr.append(sub_state)
-            self.preprocessed_curr = np.reshape(self.preprocessed_curr, (1, self.state_stack, image_height, image_width))
+            frame = self.environment.get_curr_state()
+            preprocessed_frame = self.preprocess(frame)
+            for t in range(self.history_length):
+                self.preprocessed_curr.append(preprocessed_frame)
 
         # choose action
-        Q = self.online_network.predict(self.preprocessed_curr, batch_size=1)
+        preprocessed_curr = np.reshape(self.preprocessed_curr, (1, self.history_length, image_height, image_width))
+        Q = self.online_network.predict(preprocessed_curr, batch_size=1)
 
         action, action_idx = self.environment.actions[0], 0
         if self.policy == ExplorationPolicy.E_GREEDY:
@@ -272,41 +274,40 @@ class Agent(object):
         return action, action_idx, np.mean(Q)
 
     def step(self, action, action_idx):
-        # repeat action several times and stack the states
+        # repeat action several times and stack the first frame onto the previous state
         reward = 0
         game_over = False
-        next = list()
-        for t in range(self.state_stack):
-            s, r, game_over = self.environment.step(action)
+        preprocessed_next = list(self.preprocessed_curr)
+        del preprocessed_next[0]
+        for t in range(self.skipped_frames):
+            frame, r, game_over = self.environment.step(action)
             reward += r # reward is accumulated
             if game_over:
                 break
-            next.append(s)
+            if t == 0: # rest are skipped
+                preprocessed_next.append(self.preprocess(frame))
 
         # episode finished
         if game_over:
-            self.environment.new_episode()
-
-        if reward > 0 and game_over:
-            self.win_count += 1
-
-        return next, reward, game_over
-
-    def store_next_state(self, next_state, reward, game_over, action_idx):
-        # preprocess next state
-        preprocessed_next = [self.preprocess(sub_state) for sub_state in next_state]
-        if not game_over:
-            preprocessed_next = np.reshape(preprocessed_next, (1, self.state_stack, image_height, image_width))
-        else:
             preprocessed_next = []
+            self.environment.new_episode()
+            if reward > 0:
+                self.win_count += 1 # irrelevant to most levels
+
+        return preprocessed_next, reward, game_over
+
+    def store_next_state(self, preprocessed_next, reward, game_over, action_idx):
+        preprocessed_curr = np.reshape(self.preprocessed_curr, (1, self.history_length, image_height, image_width))
+        self.preprocessed_curr = list(preprocessed_next) # saved as list
+        if preprocessed_next != []:
+            preprocessed_next = np.reshape(preprocessed_next, (1, self.history_length, image_height, image_width))
 
         # store transition
-        self.memory.remember(Transition(self.preprocessed_curr, action_idx, reward, preprocessed_next), game_over)
+        self.memory.remember(Transition(preprocessed_curr, action_idx, reward, preprocessed_next), game_over) # stored as np array
 
-        self.preprocessed_curr = preprocessed_next
         self.curr_step += 1
 
-        # copy online network to target network
+        # update target network with online network once in a while
         if self.curr_step % self.target_update_freq == 0:
             self.target_network.set_weights(self.online_network.get_weights())
 
@@ -375,6 +376,7 @@ class ExperienceReplay(object):
             probs = np.random.rand(batch_size)
             importances = [self.get_transition_importance(idx) for idx in range(len(self.memory))]
             thresholds = np.cumsum(importances)
+
             # multinomial sampling according to priorities
             indices = []
             for p in probs:
@@ -384,6 +386,7 @@ class ExperienceReplay(object):
                         break
         else:
             indices = np.random.choice(len(self.memory), batch_size)
+
         minibatch = list()
         for idx in indices:
             while not_terminals and self.memory[idx][1] == True:
@@ -397,6 +400,7 @@ class ExperienceReplay(object):
             max_weight = np.max(minibatch,0)[3]
             for idx in range(len(minibatch)):
                 minibatch[idx][3] /= float(max_weight) # normalize weights relative to the minibatch
+
         return minibatch
 
     def update_transition_priority(self, transition_idx, priority):
@@ -442,12 +446,15 @@ class Entity(object):
                           exploration_policy=args["exploration_policy"],
                           learning_rate=args["learning_rate"],
                           level=args["level"],
-                          state_stack=args["state_stack"],
+                          history_length=args["history_length"],
                           batch_size=args["batch_size"],
                           temperature=args["temperature"],
                           combine_actions=args["combine_actions"],
                           train=(args["mode"] == Mode.TRAIN),
-                          visible=False)
+                          skipped_frames=args["skipped_frames"],
+                          visible=False,
+                          target_update_freq=args["target_update_freq"])
+
             if (args["mode"] == Mode.TEST or args["mode"] == Mode.DISPLAY) and args["snapshot"] == '':
                 print("Warning: mode set to " + str(args["mode"]) + " but no snapshot was loaded")
 
@@ -459,7 +466,7 @@ class Entity(object):
         self.average_over_num_episodes = entity_args["average_over_num_episodes"]
         self.snapshot_episodes = entity_args["snapshot_episodes"]
         self.environment = Environment(level=entity_args["level"], combine_actions=entity_args["combine_actions"])
-        self.state_stack = entity_args["state_stack"]
+        self.history_length = entity_args["history_length"]
         self.win_count = 0
         self.curr_step = 0
 
@@ -487,7 +494,7 @@ class Entity(object):
         reward = 0
         game_over = False
         next_state = list()
-        for t in range(self.state_stack):
+        for t in range(self.history_length):
             s, r, game_over = self.environment.step(action)
             reward += r # reward is accumulated
             if game_over:
@@ -522,7 +529,7 @@ class Entity(object):
                 action = self.combine_actions(actions[0], actions[1]) #TODO: make this more generic
                 # the entity performs the action
                 next_state, reward, game_over = self.step(action)
-                # each agents preprocesses the next state and stores it
+                # each agent preprocesses the next state and stores it
                 for agent_idx, agent in enumerate(self.agents):
                     agent.store_next_state(next_state, reward, game_over, action_idxs[agent_idx])
 
@@ -574,11 +581,13 @@ def run_experiment(args):
                   exploration_policy=args["exploration_policy"],
                   learning_rate=args["learning_rate"],
                   level=args["level"],
-                  state_stack=args["state_stack"],
+                  history_length=args["history_length"],
                   batch_size=args["batch_size"],
                   temperature=args["temperature"],
                   combine_actions=args["combine_actions"],
-                  train=(args["mode"] == Mode.TRAIN))
+                  train=(args["mode"] == Mode.TRAIN),
+                  skipped_frames=args["skipped_frames"],
+                  target_update_freq=args["target_update_freq"])
 
     if (args["mode"] == Mode.TEST or args["mode"] == Mode.DISPLAY) and args["snapshot"] == '':
         print("Warning: mode set to " + str(args["mode"]) + " but no snapshot was loaded")
@@ -598,19 +607,19 @@ def run_experiment(args):
             next_state, reward, game_over = agent.step(action, action_idx)
             agent.store_next_state(next_state, reward, game_over, action_idx)
             steps += 1
+            total_steps += 1
             curr_return += reward
             curr_Qs += mean_Q
 
             if args["mode"] == Mode.DISPLAY:
                 sleep(0.05)
 
-            if i > args["start_learning_after"] and args["mode"] == Mode.TRAIN:
+            if i > args["start_learning_after"] and args["mode"] == Mode.TRAIN and total_steps % args["steps_between_train"] == 0:
                 loss += agent.train()
 
         n = float(args["average_over_num_episodes"])
         average_Q = (1-1/n) * average_Q + (1/n) * curr_Qs/float(steps)
         average_return = (1-1/n) * average_return + (1/n) * curr_return
-        total_steps += steps
 
         print("")
         print(str(datetime.datetime.now()))
@@ -632,7 +641,7 @@ def run_experiment(args):
 
 
 if __name__ == "__main__":
-    experiment = "multi_agent" # TODO: create a better way for this
+    experiment = "single_agent" # TODO: create a better way for this
 
     if experiment == "multi_agent":
         # multi agent entity
@@ -648,9 +657,11 @@ if __name__ == "__main__":
             "combine_actions": True,
             "temperature": 10,
             "batch_size": 10,
-            "state_stack": 4,
+            "history_length": 4,
             "snapshot": 'defend_model_1000.h5',
-            "mode": Mode.TRAIN
+            "mode": Mode.TRAIN,
+            "skipped_frames": 4,
+            "target_update_freq": 3000
         }
 
         exploring_agent = {
@@ -664,9 +675,11 @@ if __name__ == "__main__":
             "combine_actions": True,
             "temperature": 10,
             "batch_size": 10,
-            "state_stack": 4,
+            "history_length": 4,
             "snapshot": 'health_model_500.h5',
-            "mode": Mode.TRAIN
+            "mode": Mode.TRAIN,
+            "skipped_frames": 4,
+            "target_update_freq": 3000
         }
 
         entity_args = {
@@ -674,9 +687,9 @@ if __name__ == "__main__":
             "episodes": 2000,
             "steps_per_episode": 4000,  # 4300 for deathmatch, 300 for health gathering
             "average_over_num_episodes": 50,
-            "start_learning_after": 5,
+            "start_learning_after": 200,
             "mode": Mode.TRAIN,
-            "state_stack": 4,
+            "history_length": 4,
             "level": Level.DEATHMATCH,
             "combine_actions": True
         }
@@ -691,24 +704,27 @@ if __name__ == "__main__":
 
     elif experiment == "single_agent":
         softmax = {
-            "snapshot_episodes": 1000,
+            "snapshot_episodes": 500,
             "episodes": 2000,
             "steps_per_episode": 4000, # 4300 for deathmatch, 300 for health gathering
             "average_over_num_episodes": 50,
-            "start_learning_after": 5,
+            "start_learning_after": 100,
             "algorithm": Algorithm.DDQN,
             "discount": 0.99,
             "max_memory": 10000,
             "prioritized_experience": False,
             "exploration_policy": ExplorationPolicy.SOFTMAX,
             "learning_rate": 2.5e-4,
-            "level": Level.HEALTH,
+            "level": Level.DEFEND,
             "combine_actions": True,
             "temperature": 10,
-            "batch_size": 10,
-            "state_stack": 4,
-            "snapshot": 'health_model_500.h5',
-            "mode": Mode.DISPLAY
+            "batch_size": 32,
+            "history_length": 4,
+            "snapshot": '',
+            "mode": Mode.TRAIN,
+            "skipped_frames": 4,
+            "target_update_freq": 3000,
+            "steps_between_train": 4
         }
 
         multinomial = softmax.copy()
