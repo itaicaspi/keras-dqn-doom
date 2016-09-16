@@ -12,7 +12,15 @@ import datetime
 from enum import Enum
 
 
-image_height, image_width = 120, 160
+image_height, image_width = 60, 80
+
+def display_state(state):
+    frames = state.shape[0]
+    for frame in range(frames):
+        plt.subplot(1, frames, frame+1)
+        plt.imshow(state[frame], cmap='Greys_r')
+    plt.show()
+
 
 class Mode(Enum):
     TRAIN = 1
@@ -73,8 +81,8 @@ class Environment(object):
 
 class Agent(object):
     def __init__(self, discount, level, algorithm, prioritized_experience, max_memory, exploration_policy,
-                 learning_rate, history_length, batch_size, combine_actions, target_update_freq, temperature=10, snapshot='', train=True,
-                 visible=True, skipped_frames=4):
+                 learning_rate, history_length, batch_size, combine_actions, target_update_freq, epsilon_start, epsilon_end,
+                 epsilon_annealing_steps, temperature=10, snapshot='', train=True, visible=True, skipped_frames=4):
         """
 
         :param discount:
@@ -88,9 +96,9 @@ class Agent(object):
         self.trainable = train
 
         # e-greedy policy
-        self.epsilon_annealing_steps = 1e4 #steps
-        self.epsilon_start = 1
-        self.epsilon_end = 0.1
+        self.epsilon_annealing_steps = epsilon_annealing_steps #steps
+        self.epsilon_start = epsilon_start
+        self.epsilon_end = epsilon_end
         if self.trainable:
             self.epsilon = self.epsilon_start
         else:
@@ -109,8 +117,8 @@ class Agent(object):
         self.win_count = 0
         self.curr_step = 0
 
-        self.state_width = 160
-        self.state_height = 120
+        self.state_width = image_width
+        self.state_height = image_height
         self.scale = self.state_width / float(self.environment.screen_width)
 
         # training
@@ -284,6 +292,7 @@ class Agent(object):
 
         # choose action
         preprocessed_curr = np.reshape(self.preprocessed_curr, (1, self.history_length, image_height, image_width))
+        #display_state(preprocessed_curr[0])
         Q = self.online_network.predict(preprocessed_curr, batch_size=1)
 
         action, action_idx = self.environment.actions[0], 0
@@ -310,7 +319,7 @@ class Agent(object):
             reward += r # reward is accumulated
             if game_over:
                 break
-            if t == 0: # rest are skipped
+            if t == self.skipped_frames-1: # rest are skipped
                 preprocessed_next.append(self.preprocess(frame))
 
         # episode finished
@@ -479,7 +488,10 @@ class Entity(object):
                           train=(args["mode"] == Mode.TRAIN),
                           skipped_frames=args["skipped_frames"],
                           visible=False,
-                          target_update_freq=args["target_update_freq"])
+                          target_update_freq=args["target_update_freq"],
+                          epsilon_start=args["epsilon_start"],
+                          epsilon_end=args["epsilon_end"],
+                          epsilon_annealing_steps=args["epsilon_annealing_steps"])
 
             if (args["mode"] == Mode.TEST or args["mode"] == Mode.DISPLAY) and args["snapshot"] == '':
                 print("Warning: mode set to " + str(args["mode"]) + " but no snapshot was loaded")
@@ -613,7 +625,10 @@ def run_experiment(args):
                   combine_actions=args["combine_actions"],
                   train=(args["mode"] == Mode.TRAIN),
                   skipped_frames=args["skipped_frames"],
-                  target_update_freq=args["target_update_freq"])
+                  target_update_freq=args["target_update_freq"],
+                  epsilon_start=args["epsilon_start"],
+                  epsilon_end=args["epsilon_end"],
+                  epsilon_annealing_steps=args["epsilon_annealing_steps"])
 
     if (args["mode"] == Mode.TEST or args["mode"] == Mode.DISPLAY) and args["snapshot"] == '':
         print("Warning: mode set to " + str(args["mode"]) + " but no snapshot was loaded")
@@ -730,27 +745,30 @@ if __name__ == "__main__":
 
     elif experiment == "single_agent":
         softmax = {
-            "snapshot_episodes": 500,
-            "episodes": 2000,
+            "snapshot_episodes": 1000,
+            "episodes": 5000,
             "steps_per_episode": 4000, # 4300 for deathmatch, 300 for health gathering
             "average_over_num_episodes": 50,
-            "start_learning_after": 100,
+            "start_learning_after": 30,
             "algorithm": Algorithm.DDQN,
             "discount": 0.99,
-            "max_memory": 10000,
+            "max_memory": 1000,
             "prioritized_experience": False,
             "exploration_policy": ExplorationPolicy.SOFTMAX,
             "learning_rate": 2.5e-4,
             "level": Level.DEFEND,
             "combine_actions": True,
             "temperature": 10,
-            "batch_size": 32,
+            "batch_size": 10,
             "history_length": 4,
             "snapshot": '',
             "mode": Mode.TRAIN,
-            "skipped_frames": 4,
-            "target_update_freq": 1000,
-            "steps_between_train": 4
+            "skipped_frames": 1,
+            "target_update_freq": 500,
+            "steps_between_train": 1,
+            "epsilon_start": 0.7,
+            "epsilon_end": 0.05,
+            "epsilon_annealing_steps": 3e4
         }
 
         multinomial = softmax.copy()
@@ -761,6 +779,18 @@ if __name__ == "__main__":
 
         runs = [softmax, multinomial, egreedy]
         runs = [egreedy]
+
+
+        egreedy1 = egreedy.copy()
+        egreedy1["skipped_frames"] = 4
+
+        egreedy2 = egreedy.copy()
+        egreedy2["skipped_frames"] = 4
+
+        egreedy3 = egreedy.copy()
+        egreedy3["skipped_frames"] = 7
+
+        runs = [egreedy1]
 
         colors = ["r", "g", "b"]
         for color, run in zip(colors, runs):
