@@ -22,6 +22,9 @@ DDQN runs:
 [![Demo CountPages alpha](https://j.gifs.com/gJoLyj.gif)](https://youtu.be/Bvery9W-WQI)
 
 
+[![Demo CountPages alpha](http://i.makeagif.com/media/9-22-2016/RTIlUl.gif)](https://youtu.be/CFUoUhWKee0)
+
+
 
 State prediction:
 
