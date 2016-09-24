@@ -1,6 +1,8 @@
 import numpy as np
 from keras.models import Sequential, load_model, Model
 from keras.layers import Convolution2D, Dense, Flatten, merge, MaxPooling2D, Input, AveragePooling2D, Lambda
+from keras.layers.recurrent import LSTM
+from keras.layers.wrappers import TimeDistributed
 from keras.optimizers import adam, rmsprop
 from keras.initializations import uniform
 from keras import backend as K
@@ -38,6 +40,7 @@ class Level(Enum):
 class Algorithm(Enum):
     DQN = 1
     DDQN = 2
+    DRQN = 3
 
 class Architecture(Enum):
     DIRECT = 1
@@ -129,7 +132,7 @@ class Agent(object):
 
         # training
         self.discount = discount
-        self.history_length = history_length
+        self.history_length = history_length # should be 1 for DRQN
         self.skipped_frames = skipped_frames
         self.learning_rate = learning_rate
         self.batch_size = batch_size
@@ -138,8 +141,8 @@ class Agent(object):
         self.algorithm = algorithm
         self.architecture = architecture
 
-        self.target_network = self.create_network()
-        self.online_network = self.create_network()
+        self.target_network = self.create_network(architecture=architecture, algorithm=algorithm)
+        self.online_network = self.create_network(architecture=architecture, algorithm=algorithm)
         if snapshot != '':
             print("loading snapshot " + str(snapshot))
             self.target_network.load_weights(snapshot)
@@ -147,11 +150,15 @@ class Agent(object):
             self.target_network.compile(adam(lr=self.learning_rate), "mse")
             self.online_network.compile(adam(lr=self.learning_rate), "mse")
 
-    def create_network(self, architecture=Architecture.DIRECT):
-        network_type = "sequential"
+    def create_network(self, architecture=Architecture.DIRECT, algorithm=Algorithm.DDQN):
+        if algorithm == Algorithm.DRQN:
+            network_type = "recurrent"
+        else:
+            network_type = "sequential"
 
         if architecture == Architecture.DIRECT:
             if network_type == "inception":
+                print("Built an inception DQN")
                 input_img = Input(shape=(self.history_length, image_height, image_width))
                 tower_1 = Convolution2D(16, 1, 1, border_mode='same', activation='relu')(input_img)
                 tower_1 = Convolution2D(16, 3, 3, border_mode='same', activation='relu')(tower_1)
@@ -164,9 +171,10 @@ class Agent(object):
                 flatten = Flatten()(avgpool)
                 output = Dense(len(self.environment.actions))(flatten)
                 model = Model(input=input_img, output=output)
-                model.compile(adam(lr=self.learning_rate), "mse")
+                model.compile(rmsprop(lr=self.learning_rate), "mse")
                 #model.summary()
-            else:
+            elif network_type == "sequential":
+                print("Built a sequential DQN")
                 model = Sequential()
                 model.add(Convolution2D(16, 3, 3, subsample=(2,2), activation='relu', input_shape=(self.history_length, image_height, image_width), init='uniform', trainable=True))
                 model.add(Convolution2D(32, 3, 3, subsample=(2,2), activation='relu', init='uniform', trainable=True))
@@ -177,28 +185,47 @@ class Agent(object):
                 model.add(Dense(512, activation='relu', init='uniform'))
                 model.add(Dense(len(self.environment.actions),init='uniform'))
                 model.compile(rmsprop(lr=self.learning_rate), "mse")
+            elif network_type == "recurrent":
+                print("Built a recurrent DQN")
+                model = Sequential()
+                model.add(TimeDistributed(Convolution2D(16, 3, 3, subsample=(2,2), activation='relu', init='uniform', trainable=True),input_shape=(self.history_length, 1, image_height, image_width)))
+                model.add(TimeDistributed(Convolution2D(32, 3, 3, subsample=(2,2), activation='relu', init='uniform', trainable=True)))
+                model.add(TimeDistributed(Convolution2D(64, 3, 3, subsample=(2,2), activation='relu', init='uniform', trainable=True)))
+                model.add(TimeDistributed(Convolution2D(128, 3, 3, subsample=(1,1), activation='relu', init='uniform')))
+                model.add(TimeDistributed(Convolution2D(256, 3, 3, subsample=(1,1), activation='relu', init='uniform')))
+                model.add(TimeDistributed(Flatten()))
+                model.add(LSTM(512, activation='relu', init='uniform', unroll=True))
+                model.add(Dense(len(self.environment.actions),init='uniform'))
+                model.compile(rmsprop(lr=self.learning_rate), "mse")
+                #model.summary()
         elif architecture == Architecture.DUELING:
-            input = Input(shape=(self.history_length, image_height, image_width))
-            x = Convolution2D(16, 3, 3, subsample=(2, 2), activation='relu',
-                input_shape=(self.history_length, image_height, image_width), init='uniform',
-                trainable=True)(input)
-            x = Convolution2D(32, 3, 3, subsample=(2, 2), activation='relu', init='uniform', trainable=True)(x)
-            x = Convolution2D(64, 3, 3, subsample=(2, 2), activation='relu', init='uniform', trainable=True)(x)
-            x = Convolution2D(128, 3, 3, subsample=(1, 1), activation='relu', init='uniform')(x)
-            x = Convolution2D(256, 3, 3, subsample=(1, 1), activation='relu', init='uniform')(x)
-            x = Flatten()(x)
-            # state value tower - V
-            state_value = Dense(256, activation='relu', init='uniform')(x)
-            state_value = Dense(1, init='uniform')(state_value)
-            state_value = Lambda(lambda s: K.expand_dims(s[:, 0], dim=-1), output_shape=(len(self.environment.actions),))(state_value)
-            # action advantage tower - A
-            action_advantage = Dense(256, activation='relu', init='uniform')(x)
-            action_advantage = Dense(len(self.environment.actions), init='uniform')(action_advantage)
-            action_advantage = Lambda(lambda a: a[:, 1:] - K.mean(a[:, 1:], keepdims=True), output_shape=(len(self.environment.actions),))(action_advantage)
-            # merge to state-action value function Q
-            state_action_value = merge([state_value, action_advantage], mode='sum')
-            model = Model(input=input, output=state_action_value)
-            model.compile(adam(lr=self.learning_rate), "mse")
+            if network_type == "sequential":
+                print("Built a dueling sequential DQN")
+                input = Input(shape=(self.history_length, image_height, image_width))
+                x = Convolution2D(16, 3, 3, subsample=(2, 2), activation='relu',
+                    input_shape=(self.history_length, image_height, image_width), init='uniform',
+                    trainable=True)(input)
+                x = Convolution2D(32, 3, 3, subsample=(2, 2), activation='relu', init='uniform', trainable=True)(x)
+                x = Convolution2D(64, 3, 3, subsample=(2, 2), activation='relu', init='uniform', trainable=True)(x)
+                x = Convolution2D(128, 3, 3, subsample=(1, 1), activation='relu', init='uniform')(x)
+                x = Convolution2D(256, 3, 3, subsample=(1, 1), activation='relu', init='uniform')(x)
+                x = Flatten()(x)
+                # state value tower - V
+                state_value = Dense(256, activation='relu', init='uniform')(x)
+                state_value = Dense(1, init='uniform')(state_value)
+                state_value = Lambda(lambda s: K.expand_dims(s[:, 0], dim=-1), output_shape=(len(self.environment.actions),))(state_value)
+                # action advantage tower - A
+                action_advantage = Dense(256, activation='relu', init='uniform')(x)
+                action_advantage = Dense(len(self.environment.actions), init='uniform')(action_advantage)
+                action_advantage = Lambda(lambda a: a[:, :] - K.mean(a[:, :], keepdims=True), output_shape=(len(self.environment.actions),))(action_advantage)
+                # merge to state-action value function Q
+                state_action_value = merge([state_value, action_advantage], mode='sum')
+                model = Model(input=input, output=state_action_value)
+                model.compile(rmsprop(lr=self.learning_rate), "mse")
+                #model.summary()
+            else:
+                print("ERROR: not implemented")
+                exit()
 
         return model
 
@@ -317,6 +344,10 @@ class Agent(object):
 
         # choose action
         preprocessed_curr = np.reshape(self.preprocessed_curr, (1, self.history_length, image_height, image_width))
+        if self.algorithm == Algorithm.DRQN:
+            # expand dims to have a time dimension + switch between depth and time
+            preprocessed_curr = np.expand_dims(preprocessed_curr, axis=0).transpose(0,2,1,3,4)
+
         #display_state(preprocessed_curr[0])
         Q = self.online_network.predict(preprocessed_curr, batch_size=1)
 
@@ -661,12 +692,14 @@ def run_experiment(args):
     if (args["mode"] == Mode.TEST or args["mode"] == Mode.DISPLAY) and args["snapshot"] == '':
         print("Warning: mode set to " + str(args["mode"]) + " but no snapshot was loaded")
 
+    n = float(args["average_over_num_episodes"])
+
     # initialize
     total_steps = 0
-    average_return = 0
-    average_Q = 0
-    returns = []
-    Qs = []
+    returns_over_all_episodes = []
+    mean_q_over_all_episodes = []
+    return_buffer = []
+    mean_q_buffer = []
     for i in range(args["episodes"]):
         agent.environment.new_episode()
         steps, curr_return, curr_Qs, loss = 0, 0, 0, 0
@@ -686,18 +719,25 @@ def run_experiment(args):
             if i > args["start_learning_after"] and args["mode"] == Mode.TRAIN and total_steps % args["steps_between_train"] == 0:
                 loss += agent.train()
 
-        n = float(args["average_over_num_episodes"])
-        average_Q = (1-1/n) * average_Q + (1/n) * curr_Qs/float(steps)
-        average_return = (1-1/n) * average_return + (1/n) * curr_return
+        # store stats
+        if len(return_buffer) > n:
+            del return_buffer[0]
+        return_buffer += [curr_return]
+        average_return = np.mean(return_buffer)
+
+        if len(mean_q_buffer) > n:
+            del mean_q_buffer[0]
+        mean_q_buffer += [curr_Qs / float(steps)]
+        average_mean_q = np.mean(mean_q_buffer)
+
+        returns_over_all_episodes += [average_return]
+        mean_q_over_all_episodes += [average_mean_q]
 
         print("")
         print(str(datetime.datetime.now()))
         print("episode = " + str(i) + " steps = " + str(total_steps))
         print("epsilon = " + str(agent.epsilon) + " loss = " + str(loss))
         print("current_return = " + str(curr_return) + " average return = " + str(average_return))
-
-        returns += [average_return]
-        Qs += [average_Q]
 
         # save snapshot of target network
         if i % args["snapshot_episodes"] == args["snapshot_episodes"] - 1:
@@ -706,7 +746,7 @@ def run_experiment(args):
             agent.target_network.save_weights(snapshot, overwrite=True)
 
     agent.environment.game.close()
-    return returns, Qs
+    return returns_over_all_episodes, mean_q_over_all_episodes
 
 
 if __name__ == "__main__":
@@ -772,16 +812,16 @@ if __name__ == "__main__":
         plt.title("Average Return")
 
     elif experiment == "single_agent":
-        softmax = {
+        lstm = {
             "snapshot_episodes": 100,
-            "episodes": 5000,
-            "steps_per_episode": 400, # 4300 for deathmatch, 300 for health gathering
+            "episodes": 1500,
+            "steps_per_episode": 4000,  # 4300 for deathmatch, 300 for health gathering
             "average_over_num_episodes": 50,
             "start_learning_after": 30,
-            "algorithm": Algorithm.DDQN,
+            "algorithm": Algorithm.DRQN,
             "discount": 0.99,
             "max_memory": 5000,
-            "prioritized_experience": True,
+            "prioritized_experience": False,
             "exploration_policy": ExplorationPolicy.SOFTMAX,
             "learning_rate": 2.5e-4,
             "level": Level.DEFEND,
@@ -789,7 +829,7 @@ if __name__ == "__main__":
             "temperature": 10,
             "batch_size": 10,
             "history_length": 4,
-            "snapshot": 'model_3200.h5',
+            "snapshot": '',
             "mode": Mode.TRAIN,
             "skipped_frames": 7,
             "target_update_freq": 1000,
@@ -797,25 +837,38 @@ if __name__ == "__main__":
             "epsilon_start": 0.7,
             "epsilon_end": 0.01,
             "epsilon_annealing_steps": 3e4,
+            "architecture": Architecture.DIRECT
+        }
+
+        egreedy = {
+            "snapshot_episodes": 100,
+            "episodes": 5000,
+            "steps_per_episode": 4000, # 4300 for deathmatch, 300 for health gathering
+            "average_over_num_episodes": 50,
+            "start_learning_after": 50,
+            "algorithm": Algorithm.DDQN,
+            "discount": 0.99,
+            "max_memory": 5000,
+            "prioritized_experience": False,
+            "exploration_policy": ExplorationPolicy.E_GREEDY,
+            "learning_rate": 2.5e-4,
+            "level": Level.HEALTH,
+            "combine_actions": True,
+            "temperature": 10,
+            "batch_size": 10,
+            "history_length": 4,
+            "snapshot": 'model_3400.h5',
+            "mode": Mode.TRAIN,
+            "skipped_frames": 7,
+            "target_update_freq": 1000,
+            "steps_between_train": 1,
+            "epsilon_start": 0.7, #TODO: change the value to 0.7
+            "epsilon_end": 0.01,
+            "epsilon_annealing_steps": 3e4,
             "architecture": Architecture.DUELING
         }
 
-        multinomial = softmax.copy()
-        multinomial["exploration_policy"] = ExplorationPolicy.SHIFTED_MULTINOMIAL
-
-        egreedy = softmax.copy()
-        egreedy["exploration_policy"] = ExplorationPolicy.E_GREEDY
-
-        runs = [softmax, multinomial, egreedy]
         runs = [egreedy]
-
-        egreedy_dueling = egreedy.copy()
-        egreedy_dueling["architecture"] = Architecture.DUELING
-
-        egreedy_ddqn = egreedy.copy()
-        egreedy_ddqn["architecture"] = Architecture.DIRECT
-
-        runs = [egreedy_dueling, egreedy_ddqn]
 
         colors = ["r", "g", "b"]
         for color, run in zip(colors, runs):
