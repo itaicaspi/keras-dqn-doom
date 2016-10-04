@@ -6,16 +6,19 @@ from keras.layers.convolutional import UpSampling2D, Convolution2D, Deconvolutio
 from keras.layers.advanced_activations import LeakyReLU
 from keras.layers.core import Flatten
 from keras.optimizers import SGD, Adam
+from keras import backend as K
 import scipy.ndimage
 import numpy as np
 import itertools as it
 import matplotlib.pyplot as plt
 from vizdoom import *
-from main import Agent
+from main import *
 
 class GAN(object):
     def __init__(self):
-        self.generator     = self.generator_model()
+        self.frame_width = 80
+        self.frame_height = 72
+        self.generator, self.encoder, self.decoder = self.generator_model()
         self.discriminator = self.discriminator_model()
         self.full_network  = self.full_network_model(self.generator, self.discriminator)
 
@@ -23,67 +26,76 @@ class GAN(object):
 
     # expected input: [action: (3), state: (4,128,160)]
     def generator_model(self):
+        input_img = Input(shape=(4, self.frame_height, self.frame_width))
 
         # state encoder
-        state = Input(shape=(4, 128, 160))
-        x = Convolution2D(16, 5, 5, subsample=(2, 2), input_shape=(4, 128, 160), border_mode='same', init='glorot_normal')(state)
+        x = Convolution2D(16, 3, 3, subsample=(2, 2), activation='relu', border_mode='same')(input_img)
         x = BatchNormalization(mode=2)(x)
-        x = Activation('relu')(x)
-        x = Convolution2D(32, 5, 5, subsample=(2, 2), border_mode='same', init='glorot_normal')(x)
+        x = Convolution2D(32, 3, 3, subsample=(2, 2), activation='relu', border_mode='same')(x)
         x = BatchNormalization(mode=2)(x)
-        x = Activation('relu')(x)
-        x = Convolution2D(64, 5, 5, subsample=(2, 2), border_mode='same', init='glorot_normal')(x)
+        x = Convolution2D(64, 3, 3, subsample=(2, 2), activation='relu', border_mode='same')(x)
         x = BatchNormalization(mode=2)(x)
-        x = Activation('relu')(x)
-        x = Convolution2D(128, 5, 5, subsample=(2, 2), border_mode='same', init='glorot_normal')(x)
-        x = BatchNormalization(mode=2)(x)
-        x = Activation('relu')(x)
         x = Flatten()(x)
-        x = Dense(500, init='glorot_normal')(x)
-        state_embedding = Activation('sigmoid')(x)
+        encoded_state = Dense(32, activation='relu')(x)
+        encoded_state = Lambda(lambda a: K.greater(a, K.zeros_like(a)), output_shape=(32,))(encoded_state)
+        state_encoder = Model(input=input_img, output=encoded_state)
 
         # action encoder
         action = Input(shape=(3,))
-        x = Dense(input_dim=3, output_dim=20, init='glorot_normal')(action)
-        x = Activation('relu')(x)
-        x = Dense(100, init='glorot_normal')(x)
-        action_embedding = Activation('sigmoid')(x)
+        x = Dense(input_dim=3, output_dim=8, activation='relu')(action)
+        encoded_action = Dense(8, activation='relu')(x)
 
-        # encoder
-        embedding = merge([state_embedding, action_embedding], mode='concat')
+        encoded = merge([encoded_state, encoded_action], mode='concat')
+        encoded = Lambda(lambda a: K.cast(a, 'float32'), output_shape=(40,))(encoded)
 
-        # genrerator
-        x = Dense(input_dim=600, output_dim=128 * 8 * 10, init='glorot_normal')(embedding)
-        x = Reshape((128, 8, 10))(x)
-        x = Activation('relu')(x)
-        x = UpSampling2D(size=(2, 2))(x)
-        x = Convolution2D(64, 5, 5, border_mode='same', init='glorot_normal')(x)
+        x = Dense(input_dim=40, output_dim=64 * 9 * 10)(encoded)
+        x = Reshape((64, 9, 10))(x)
+        x = Convolution2D(32, 3, 3, activation='relu', border_mode='same')(x)
+        x = UpSampling2D((2, 2))(x)
         x = BatchNormalization(mode=2)(x)
-        x = Activation('relu')(x)
-        x = UpSampling2D(size=(2, 2))(x)
-        x = Convolution2D(32, 5, 5, border_mode='same', init='glorot_normal')(x)
+        x = Convolution2D(16, 3, 3, activation='relu', border_mode='same')(x)
+        x = UpSampling2D((2, 2))(x)
         x = BatchNormalization(mode=2)(x)
-        x = Activation('relu')(x)
-        x = UpSampling2D(size=(2, 2))(x)
-        x = Convolution2D(16, 5, 5, border_mode='same', init='glorot_normal')(x)
+        x = Convolution2D(4, 3, 3, activation='relu', border_mode='same')(x)
+        x = UpSampling2D((2, 2))(x)
         x = BatchNormalization(mode=2)(x)
-        x = Activation('relu')(x)
-        x = UpSampling2D(size=(2, 2))(x)
-        x = Convolution2D(1, 5, 5, border_mode='same', init='glorot_normal')(x)
+        decoded = Convolution2D(1, 3, 3, activation='sigmoid', border_mode='same')(x)
+
+        autoencoder = Model([input_img, action], decoded)
+        autoencoder.compile(optimizer=Adam(lr=5e-4), loss='binary_crossentropy')
+        autoencoder.summary()
+
+        #######################################################
+        encoded_state = Input(shape=(32,))
+        action = Input(shape=(3,))
+        x = Dense(input_dim=3, output_dim=8, activation='relu')(action)
+        encoded_action = Dense(8, activation='relu')(x)
+        encoded = merge([encoded_state, encoded_action], mode='concat')
+        encoded = Lambda(lambda a: K.cast(a, 'float32'), output_shape=(40,))(encoded)
+        x = Dense(input_dim=40, output_dim=64 * 9 * 10)(encoded)
+        x = Reshape((64, 9, 10))(x)
+        x = Convolution2D(32, 3, 3, activation='relu', border_mode='same')(x)
+        x = UpSampling2D((2, 2))(x)
         x = BatchNormalization(mode=2)(x)
-        next_state = Activation('sigmoid')(x)
-        model = Model(input=[state, action], output=[next_state])
-        model.compile(loss='binary_crossentropy', optimizer=Adam(lr=1e-4))
-        #model.summary()
-        return model
+        x = Convolution2D(16, 3, 3, activation='relu', border_mode='same')(x)
+        x = UpSampling2D((2, 2))(x)
+        x = BatchNormalization(mode=2)(x)
+        x = Convolution2D(4, 3, 3, activation='relu', border_mode='same')(x)
+        x = UpSampling2D((2, 2))(x)
+        x = BatchNormalization(mode=2)(x)
+        decoded = Convolution2D(1, 3, 3, activation='sigmoid', border_mode='same')(x)
+        decoder = Model([encoded_state, action], decoded)
+        decoder.compile(optimizer=Adam(lr=5e-4), loss='binary_crossentropy')
+
+        return autoencoder, state_encoder, decoder
 
     # DISCRIMINATOR (input: [curr_state + next_state, action], output: classification)
 
     # expected input: [action: (3), state_stack: (5,128,160)]
     def discriminator_model(self):
         # state discriminator
-        state_stack = Input(shape=(5, 128, 160))
-        x = Convolution2D(16, 5, 5, subsample=(4, 4), input_shape=(5, 128, 160), border_mode='same', init='glorot_normal')(state_stack)
+        state_stack = Input(shape=(5, self.frame_height, self.frame_width))
+        x = Convolution2D(16, 5, 5, subsample=(4, 4), input_shape=(5, self.frame_height, self.frame_width), border_mode='same', init='glorot_normal')(state_stack)
         x = LeakyReLU(alpha=0.2)(x)
         x = Dropout(0.25)(x)
         x = Convolution2D(32, 5, 5, subsample=(4, 4), border_mode='same', init='glorot_normal')(x)
@@ -113,7 +125,7 @@ class GAN(object):
 
     # expected input: [state_stack: (4,128,160), [action: (3), state_stack: (4,128,160)]]
     def full_network_model(self, generator, discriminator):
-        state = Input(shape=(4, 128, 160))
+        state = Input(shape=(4, self.frame_height, self.frame_width))
         action = Input(shape=(3,))
 
         make_trainable(discriminator, False)
@@ -124,12 +136,23 @@ class GAN(object):
 
         model = Model(input=[state, action], output=[prediction])
         model.compile(loss='categorical_crossentropy', optimizer=Adam(lr=1e-4))
-        model.summary()
+        #model.summary()
         return model
+
+    def predict_multiple_action_single_state(self, state):
+        predicted_next_states = []
+        for action in range(3):
+            one_hot = [False] * 3
+            one_hot[action] = True
+            predicted_next_state = self.generator.predict([np.expand_dims(state, 0), np.expand_dims(one_hot,0)])
+            predicted_next_states += [predicted_next_state]
+
+        return predicted_next_states
 
     def predict_next_state(self, state, action):
         predicted_next_state = self.generator.predict([state, action])
-        return predicted_next_state
+        encoded_state = self.encoder.predict(state)
+        return predicted_next_state, encoded_state
 
     def discriminate_next_state(self, state, action, next_state):
         state_stack = np.concatenate((state, next_state), axis=0)
@@ -164,7 +187,7 @@ class GAN(object):
 
 def padState(state):
     # pad the inputs from the top and the bottom to from 120 to 128 to fit the network
-    return np.lib.pad(state, ((0, 0), (4, 4), (0, 0)), 'constant', constant_values=(0))
+    return np.lib.pad(state, ((0, 0), (6, 6), (0, 0)), 'constant', constant_values=(0))
 
 
 def make_trainable(net, val):
@@ -176,9 +199,12 @@ def make_trainable(net, val):
 def get_batch():
     minibatch = np.array(agent.memory.sample_minibatch(batch_size, not_terminals=True))
     minibatch_transitions = minibatch[:, 1]
-    states = np.array([padState(transition.preprocessed_curr[0]) for transition in minibatch_transitions])
+    states = np.array([padState(transition.preprocessed_curr[0]) for transition in minibatch_transitions]) / 255.0
     actions = np.array([agent.environment.actions[transition.action] for transition in minibatch_transitions])
-    next_states = np.array([padState(np.expand_dims(transition.preprocessed_next[0][0], 0)) for transition in minibatch_transitions])
+    next_states = np.array([padState(np.expand_dims(transition.preprocessed_next[0][0], 0)) for transition in minibatch_transitions]) / 255.0
+    #print(np.max(states[0][0]))
+    #plt.imshow(states[0][0], cmap='Greys_r')
+    #plt.show()
     return states, actions, next_states
 
 
@@ -191,13 +217,32 @@ if __name__ == "__main__":
     #print(model.discriminator.input)
     #print(model.discriminator.output)
 
-    observe_episodes = 500
+    observe_episodes = 20
     train_episodes = 10000
     discriminator_pretrain_episodes = 0
     generator_pretrain_episodes = 100000
     steps_per_episode = 40
     batch_size = 20
-    agent = Agent(discount=0.99, snapshot='', max_memory=50000, prioritized_experience=False)
+    agent = Agent(algorithm=Algorithm.DDQN,
+                  discount=0.99,
+                  snapshot='',
+                  max_memory=10000,
+                  prioritized_experience=False,
+                  exploration_policy=ExplorationPolicy.E_GREEDY,
+                  learning_rate=2.5e-4,
+                  level=Level.HEALTH,
+                  history_length=4,
+                  batch_size=10,
+                  temperature=1,
+                  combine_actions=True  ,
+                  train=True,
+                  skipped_frames=4,
+                  target_update_freq=1000,
+                  epsilon_start=0.7,
+                  epsilon_end=0.1,
+                  epsilon_annealing_steps=5e4,
+                  architecture=Architecture.DUELING,
+                  visible=False)
 
     generator_loss = []
     discriminator_loss = []
@@ -212,7 +257,9 @@ if __name__ == "__main__":
         loss = 0
         game_over = False
         while not game_over and steps < steps_per_episode:
-            _, _, game_over = agent.step()
+            action, action_idx, mean_Q = agent.predict()
+            next_state, reward, game_over = agent.step(action, action_idx)
+            agent.store_next_state(next_state, reward, game_over, action_idx)
             steps += 1
 
     agent.environment.game.close()
@@ -233,14 +280,28 @@ if __name__ == "__main__":
         print("iteration " + str(i) + " loss: " + str(loss))
         generator_loss += [loss]
 
-        if i % 20 == 0:
-            test_predicted_next = model.predict_next_state(states, actions)
-            scipy.misc.toimage(next_states[0][0], cmin=0.0, cmax=1.0).save(
+        if i % 200 == 0:
+            """
+            test_predicted_next, code = model.predict_next_state(states, actions)
+            print(test_predicted_next.shape)
+            scipy.misc.toimage(np.reshape(next_states,(20*72, 80)), cmin=0.0, cmax=1.0).save(
                 'results/pretraining_' + str(int(i / 10)) + '_true.jpg')
-            scipy.misc.toimage(test_predicted_next[0][0], cmin=0.0, cmax=1.0).save(
+            scipy.misc.toimage(np.reshape(test_predicted_next,(20*72,80)), cmin=0.0, cmax=1.0).save(
                 'results/pretraining_' + str(int(i / 10)) + '_fake.jpg')
+            scipy.misc.toimage(code, cmin=0.0, cmax=1.0).save(
+                'results/pretraining_' + str(int(i / 10)) + '_code.jpg')
+            """
+            predicted_next = model.predict_multiple_action_single_state(states[0])
+            print(np.array(predicted_next).shape)
+            for i in range(3):
+                #plt.subplot(1,3,i+1)
+                #plt.imshow(predicted_next[i][0][0])
+                #plt.gray()
+                scipy.misc.toimage(predicted_next[i][0][0], cmin=0.0, cmax=1.0).save(
+                    'results/pretraining_action_' + str(int(i)) + '.jpg')
 
-            snapshot = 'gan_model.h5'
+            #plt.show()
+            snapshot = 'gan_model_' + str(i) + '.h5'
             print(" >> saving snapshot to " + snapshot)
             model.generator.save_weights(snapshot, overwrite=True)
 
