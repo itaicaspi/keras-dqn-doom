@@ -3,9 +3,11 @@ from keras.models import Sequential, load_model, Model
 from keras.layers import Convolution2D, Dense, Flatten, merge, MaxPooling2D, Input, AveragePooling2D, Lambda, Merge, Activation, Embedding
 from keras.layers.recurrent import LSTM, GRU
 from keras.layers.wrappers import TimeDistributed
+from keras.layers.normalization import BatchNormalization
 from keras.optimizers import adam, rmsprop
-from keras.layers.core import RepeatVector, Masking, TimeDistributedDense
+from keras.layers.core import RepeatVector, Masking, TimeDistributedDense, Reshape
 from keras.initializations import uniform
+from keras.layers.advanced_activations import LeakyReLU, ELU
 from keras.preprocessing.sequence import pad_sequences
 from keras import backend as K
 from vizdoom import *
@@ -17,8 +19,8 @@ import datetime
 from enum import Enum
 
 
-image_height, image_width = 60, 80
-
+image_height, image_width = 60, 80 #TODO: change to 72
+merged_model = []
 def display_state(state):
     frames = state.shape[0]
     for frame in range(frames):
@@ -26,6 +28,16 @@ def display_state(state):
         plt.imshow(state[frame], cmap='Greys_r')
     plt.show()
 
+def scalar_to_one_hot(idx):
+    one_hot = np.zeros((1,8))
+    one_hot[0][idx] = 1
+    return one_hot
+
+def vec_to_one_hot(vec):
+    return [scalar_to_one_hot(idx) for idx in vec]
+
+def batch_to_one_hot(batch):
+    return [vec_to_one_hot(vec)[0] for vec in batch]
 
 class Mode(Enum):
     TRAIN = 1
@@ -125,7 +137,7 @@ class Agent(object):
 
         # initialization
         self.environment = Environment(level=level, combine_actions=combine_actions, visible=visible)
-        self.memory = ExperienceReplay(max_memory=max_memory, prioritized=prioritized_experience, store_episodes=(architecture==Architecture.SEQUENCE))
+        self.memory = ExperienceReplay(max_memory=max_memory, prioritized=prioritized_experience, store_episodes=(max_action_sequence_length>1))
         self.preprocessed_curr = []
         self.win_count = 0
         self.curr_step = 0
@@ -137,10 +149,10 @@ class Agent(object):
         # recurrent
         self.max_action_sequence_length = max_action_sequence_length
         self.num_actions = len(self.environment.actions)
-        self.input_action_space_size = self.num_actions + 2 # number of actions + start and end tokens
-        self.output_action_space_size = self.num_actions + 1
-        self.start_token = self.num_actions + 1
-        self.end_token = self.num_actions
+        self.input_action_space_size = self.num_actions + 2 # number of actions + start and end (padding) tokens
+        self.output_action_space_size = self.num_actions
+        self.start_token = self.num_actions
+        self.end_token = self.num_actions + 1
 
         # training
         self.discount = discount
@@ -149,6 +161,9 @@ class Agent(object):
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.target_update_freq = target_update_freq
+        self.incremental_target_update = True
+        self.increment_each_num_steps = 10
+        self.tau = 30/float(self.target_update_freq)
 
         self.algorithm = algorithm
         self.architecture = architecture
@@ -161,6 +176,99 @@ class Agent(object):
             self.online_network.load_weights(snapshot)
             self.target_network.compile(adam(lr=self.learning_rate), "mse")
             self.online_network.compile(adam(lr=self.learning_rate), "mse")
+        """
+        self.target_network, self.state_encoder, self.target_state_decoder = self.autoencoder()
+        self.online_network, _, self.online_state_decoder = self.autoencoder()
+        self.state_encoder.load_weights('state_encoder_model_8000.h5')
+        self.state_encoder.compile(adam(lr=5e-4), "mse")
+        self.predictor = self.predictor_model()
+        self.predictor.load_weights('predictor_model_5000.h5')
+        self.predictor.compile(adam(lr=5e-4), "mse")
+        """
+        #TODO: remove commment
+
+    def predictor_model(self):
+        input = Input(shape=(200,))
+
+        x = Dense(200, activation='relu')(input)
+
+        encoded_state = Dense(200, activation='relu')(x)
+
+        # action encoder
+        action = Input(shape=(3,))
+        x = Dense(input_dim=3, output_dim=8, activation='relu')(action)
+        encoded_action = Dense(8, activation='relu')(x)
+
+        x = merge([encoded_state, encoded_action], mode='concat')
+
+        x = Dense(200)(x)
+
+        x = ELU()(x)
+
+        x = Dense(200)(x)
+
+        next_state = ELU()(x)
+
+        predictor = Model(input=[input, action], output=next_state)
+
+        predictor.compile(optimizer=adam(lr=5e-4), loss='mse')
+
+        return predictor
+
+    def autoencoder(self):
+        a = 1.0
+        input_img = Input(shape=(self.history_length, 72, 80))
+
+        # state encoder
+        x = Convolution2D(16, 3, 3, subsample=(2, 2), border_mode='same', trainable=False)(input_img)
+        x = ELU(a)(x)
+        # x = BatchNormalization(mode=2)(x)
+        x = Convolution2D(32, 3, 3, subsample=(2, 2), border_mode='same', trainable=False)(x)
+        x = ELU(a)(x)
+        # x = BatchNormalization(mode=2)(x)
+        x = Convolution2D(64, 3, 3, subsample=(2, 2), border_mode='same', trainable=False)(x)
+        x = ELU(a)(x)
+        # x = BatchNormalization(mode=2)(x)
+        x = Flatten()(x)
+        encoded_state = Dense(200, trainable=False)(x)
+        encoded_state = ELU(a)(encoded_state)
+        # encoded_state = Lambda(lambda a: K.greater(a, K.zeros_like(a)), output_shape=(32,))(encoded_state)
+        state_encoder = Model(input=input_img, output=encoded_state)
+
+        input_encoded_state = Input(shape=(200,))
+
+        state_value = Dense(256, activation='relu', init='uniform')
+        _state_value = state_value(encoded_state)
+        __state_value = state_value(input_encoded_state)
+        state_value = Dense(1, init='uniform')
+        _state_value = state_value(_state_value)
+        __state_value = state_value(__state_value)
+        state_value = Lambda(lambda s: K.expand_dims(s[:, 0], dim=-1),
+                             output_shape=(len(self.environment.actions),))
+        _state_value = state_value(_state_value)
+        __state_value = state_value(__state_value)
+
+        # action advantage tower - A
+        action_advantage = Dense(256, activation='relu', init='uniform')
+        _action_advantage = action_advantage(encoded_state)
+        __action_advantage = action_advantage(input_encoded_state)
+        action_advantage = Dense(len(self.environment.actions), init='uniform')
+        _action_advantage = action_advantage(_action_advantage)
+        __action_advantage = action_advantage(__action_advantage)
+        action_advantage = Lambda(lambda a: a[:, :] - K.mean(a[:, :], keepdims=True),
+                                  output_shape=(len(self.environment.actions),))
+        _action_advantage = action_advantage(_action_advantage)
+        __action_advantage = action_advantage(__action_advantage)
+
+        # merge to state-action value function Q
+        state_action_value = merge([_state_value, _action_advantage], mode='sum')
+        __state_action_value = merge([__state_value, __action_advantage], mode='sum')
+        model = Model(input=input_img, output=state_action_value)
+        model.compile(rmsprop(lr=self.learning_rate), "mse")
+        model_decoder = Model(input=input_encoded_state, output=__state_action_value)
+        model_decoder.compile(rmsprop(lr=self.learning_rate), "mse")
+
+        return model, state_encoder, model_decoder
 
     def create_network(self, architecture=Architecture.DIRECT, algorithm=Algorithm.DDQN):
         if algorithm == Algorithm.DRQN:
@@ -239,35 +347,30 @@ class Agent(object):
                 print("ERROR: not implemented")
                 exit()
         elif architecture == Architecture.SEQUENCE:
-            # state model
+            print("Built a recurrent DQN")
             state_model = Sequential()
             state_model.add(Convolution2D(16, 3, 3, subsample=(2, 2), activation='relu',
-                                          input_shape=(self.history_length, self.state_height, self.state_width), init='uniform', trainable=True))
-            state_model.add(
-                Convolution2D(32, 3, 3, subsample=(2, 2), activation='relu', init='uniform', trainable=True))
-            state_model.add(
-                Convolution2D(64, 3, 3, subsample=(2, 2), activation='relu', init='uniform', trainable=True))
+                                    input_shape=(self.history_length, self.state_height, self.state_width),
+                                    init='uniform', trainable=True))
+            state_model.add(Convolution2D(32, 3, 3, subsample=(2, 2), activation='relu', init='uniform', trainable=True))
+            state_model.add(Convolution2D(64, 3, 3, subsample=(2, 2), activation='relu', init='uniform', trainable=True))
             state_model.add(Convolution2D(128, 3, 3, subsample=(1, 1), activation='relu', init='uniform'))
             state_model.add(Convolution2D(256, 3, 3, subsample=(1, 1), activation='relu', init='uniform'))
             state_model.add(Flatten())
-            state_model.add(Dense(100, activation='relu', init='uniform'))
-            state_model.add(RepeatVector(1))
-            #state_model.summary()
+            state_model.add(Dense(512, activation='relu', init='uniform'))
+            state_model.add(RepeatVector(self.max_action_sequence_length))
 
-            # action model
             action_model = Sequential()
-            #action_model.add(Masking(mask_value=8, input_shape=(self.max_action_sequence_length,1)))
-            action_model.add(MaskedEmbedding(self.end_token, input_dim=self.input_action_space_size, output_dim=100, init='uniform', input_length=(self.max_action_sequence_length+1)))
-            #action_model.summary()
+            action_model.add(Masking(mask_value=self.end_token, input_shape=(self.max_action_sequence_length,)))
+            action_model.add(Embedding(input_dim=self.input_action_space_size, output_dim=100, init='uniform', input_length=self.max_action_sequence_length))
+            action_model.add(TimeDistributed(Dense(100, init='uniform', activation='relu')))
 
-            # combined model
             model = Sequential()
-            model.add(Merge([state_model, action_model], mode='concat', concat_axis=1))
-            model.add(LSTM(256, return_sequences=True, init='uniform'))
-            model.add(TimeDistributed(Dense(self.output_action_space_size, init='uniform', activation='softmax')))
-            #model.summary()
-            #exit()
-            model.compile(loss='categorical_crossentropy', optimizer='rmsprop')
+            model.add(Merge([state_model, action_model], mode='concat', concat_axis=-1))
+            model.add(LSTM(512, return_sequences=True, activation='relu', init='uniform'))
+            model.add(TimeDistributed(Dense(len(self.environment.actions), init='uniform')))
+            model.compile(rmsprop(lr=self.learning_rate), "mse")
+            model.summary()
 
         return model
 
@@ -276,7 +379,82 @@ class Agent(object):
         if self.scale == 1:
             return np.mean(state,0)
         else:
-            return scipy.misc.imresize(np.mean(state,0), self.scale)
+            state = scipy.misc.imresize(np.mean(state,0), self.scale)
+            #state = np.lib.pad(state, ((6, 6), (0, 0)), 'constant', constant_values=(0)) #TODO: remove comment
+            return state
+
+    def get_inputs_and_targets_for_sequence(self, minibatch):
+        """Given a minibatch, extract the inputs and targets for the training according to DQN or DDQN
+
+                :param minibatch: the minibatch to train on
+                :return: the inputs, targets and sample weights (for prioritized experience replay)
+                """
+        # if self.architecture == Architecture.SEQUENCE:
+        #    return self.get_inputs_and_targets_for_sequence(minibatch)
+
+        targets = list()
+        action_idxs = list()
+        inputs = list()
+        samples_weights = list()
+        for idx, transition_list, game_over, sample_weight in minibatch:
+
+            # choose random end transition from the episode
+            end_idx = np.random.randint(0, len(transition_list))
+            start_idx = max(0, end_idx - self.max_action_sequence_length + 1)
+
+            # there should be at least one chosen transition)
+            chosen_transitions = transition_list[start_idx:end_idx+1]
+            num_chosen_transitions = len(chosen_transitions)
+            first_transition = chosen_transitions[0]
+            last_transition = chosen_transitions[-1]
+
+            # relevant actions
+            chosen_actions = [transition.action for transition in chosen_transitions]
+            input_actions = [self.start_token] + chosen_actions[:-1]
+            # pad in the end if necessary
+            if len(input_actions) < self.max_action_sequence_length:
+                input_actions += [self.end_token] * (self.max_action_sequence_length - num_chosen_transitions)
+            actions_for_next_state = [self.start_token] + [self.end_token] * (self.max_action_sequence_length - 1)
+
+            # prepare input for predicting the current and next actions
+            curr_input = [first_transition.preprocessed_curr, np.array([input_actions])]
+            next_input = [last_transition.preprocessed_next, np.array([actions_for_next_state])]
+
+            action_idxs.append(input_actions)
+            inputs.append(curr_input[0][0])
+
+            # get the current action-values
+            target = self.online_network.predict(curr_input)[0]
+
+            # calculate TD-target for last transition
+            next_value = 0
+            if game_over and end_idx == len(transition_list)-1:
+                next_value = last_transition.reward
+            else:
+                if self.algorithm == Algorithm.DQN:
+                    Q_sa = self.target_network.predict(next_input)[0][0]
+                    next_value = np.max(Q_sa)
+
+                elif self.algorithm == Algorithm.DDQN:
+                    best_next_action = np.argmax(self.online_network.predict(next_input)[0][0])
+                    next_value = self.target_network.predict(next_input)[0][0][best_next_action]
+
+            current_index = min(self.max_action_sequence_length, num_chosen_transitions) - 1
+            for idx in range(current_index,-1,-1):
+                transition = chosen_transitions[idx]
+                TD_target = transition.reward + self.discount * next_value
+                TD_error = TD_target - target[idx][transition.action]
+                target[idx][transition.action] = TD_target
+
+            targets.append(target)
+
+            # updates priority and weight for prioritized experience replay
+            if self.memory.prioritized:
+                self.memory.update_transition_priority(idx, np.abs(TD_error))
+                samples_weights.append(sample_weight)
+
+        #print(action_idxs)
+        return np.array(inputs), np.array(targets), np.array(samples_weights), np.array(action_idxs)
 
     def get_inputs_and_targets(self, minibatch):
         """Given a minibatch, extract the inputs and targets for the training according to DQN or DDQN
@@ -284,77 +462,40 @@ class Agent(object):
         :param minibatch: the minibatch to train on
         :return: the inputs, targets and sample weights (for prioritized experience replay)
         """
+        if self.architecture == Architecture.SEQUENCE:
+            return self.get_inputs_and_targets_for_sequence(minibatch)
+
         targets = list()
         action_idxs = list()
         inputs = list()
         samples_weights = list()
         for idx, transition_list, game_over, sample_weight in minibatch:
             # for episodic experience - choose a random ending action
-            end_transition_idx = np.random.randint(0, len(transition_list))
-            start_transition_idx = max(0, end_transition_idx-self.max_action_sequence_length+1)
-            first_transition = transition_list[start_transition_idx]
-            last_transition = transition_list[end_transition_idx]
-            TD_error = 0 # temporal difference error (actual action-value - predicted action value)
-            inputs.append(first_transition.preprocessed_curr[0])
+            transition = transition_list[0]
+            inputs.append(transition.preprocessed_curr[0])
 
-            # get the sequence of actions for episodic experience replay
-            # take actions starting from one action before the first state and ending in one before the last state
-            record_action_idxs = [self.start_token]
-            chosen_transitions = transition_list[max(0,start_transition_idx):max(0,end_transition_idx)]
-            for transition in chosen_transitions:
-                record_action_idxs += [transition.action]
-            padded_action_sequence_idxs = pad_sequences([record_action_idxs],
-                                                        maxlen=(self.max_action_sequence_length+1),
-                                                        value=self.end_token,
-                                                        padding='post')
-            action_idxs += list(padded_action_sequence_idxs)
-
-            # prepare input for predicting the current actions
-            curr_input = first_transition.preprocessed_curr
-            if self.architecture == Architecture.SEQUENCE:
-                curr_input = [first_transition.preprocessed_curr, padded_action_sequence_idxs]
-
-            # prepare input for predicting the next actions
-            next_input = last_transition.preprocessed_next
-            if self.architecture == Architecture.SEQUENCE:
-                # TODO: maybe need to look at next episode
-                padded_action_sequence_idxs = pad_sequences([np.array([self.start_token])],
-                                                            maxlen=(self.max_action_sequence_length+1),
-                                                            value=self.end_token,
-                                                            padding='post')
-                next_input = [last_transition.preprocessed_next, padded_action_sequence_idxs]
+            # prepare input for predicting the current and next actions
+            curr_input = transition.preprocessed_curr
+            next_input = transition.preprocessed_next
 
             # get the current action-values
             target = self.online_network.predict(curr_input)[0]
-            current_target_idx = end_transition_idx+1
-            chosen_transitions += [last_transition]
+
             # calculate TD-target for last transition
             if game_over:
-                TD_target = last_transition.reward
+                TD_target = transition.reward
             else:
                 if self.algorithm == Algorithm.DQN:
                     Q_sa = self.target_network.predict(next_input)
-                    if self.architecture == Architecture.SEQUENCE:
-                        Q_sa = Q_sa[0][current_target_idx]
-                    TD_target = last_transition.reward + self.discount * np.max(Q_sa)
-                elif self.algorithm == Algorithm.DDQN:
-                    if self.architecture == Architecture.SEQUENCE:
-                        best_next_action = np.argmax(self.online_network.predict(next_input)[0][1])
-                        Q_sa = self.target_network.predict(next_input)[0][1][best_next_action]
-                    else:
-                        best_next_action = np.argmax(self.online_network.predict(next_input))
-                        Q_sa = self.target_network.predict(next_input)[0][best_next_action]
-                    TD_target = last_transition.reward + self.discount * Q_sa
+                    TD_target = transition.reward + self.discount * np.max(Q_sa)
 
-            if self.architecture == Architecture.SEQUENCE:
-                target[current_target_idx][last_transition.action] = TD_target
-                # bootstrap the targets of all the other actions
-                for idx in range(current_target_idx - 1, 0, -1):
-                    TD_target = chosen_transitions[idx].reward + self.discount * TD_target
-                    target[idx][chosen_transitions[idx].action] = TD_target
-            else:
-                TD_error = TD_target - target[last_transition.action]
-                target[last_transition.action] = TD_target
+                elif self.algorithm == Algorithm.DDQN:
+                    best_next_action = np.argmax(self.online_network.predict(next_input))
+                    Q_sa = self.target_network.predict(next_input)[0][best_next_action]
+                    TD_target = transition.reward + self.discount * Q_sa
+
+            TD_error = TD_target - target[transition.action]
+            target[transition.action] = TD_target
             targets.append(target)
 
             # updates priority and weight for prioritized experience replay
@@ -434,12 +575,47 @@ class Agent(object):
             exit()
         return action, action_idx
 
+    def predict_sequence(self):
+        """predict action according to the current state
+
+        :return: the action, the action index, the mean Q value
+        """
+        # if no current state is present, create one by stacking the duplicated current state
+
+        if self.preprocessed_curr == []:
+            frame = self.environment.get_curr_state()
+            preprocessed_frame = self.preprocess(frame)
+            for t in range(self.history_length):
+                self.preprocessed_curr.append(preprocessed_frame)
+
+        # choose action
+        preprocessed_curr = np.reshape(self.preprocessed_curr, (1, self.history_length, self.state_height, self.state_width))
+
+        actions = []
+        action_idxs = []
+        # predict a single action
+        curr_idx = 1
+        input_actions = [self.start_token] + [self.end_token] * (self.max_action_sequence_length-1)
+        for idx in range(1,self.max_action_sequence_length+1):
+            Q = self.online_network.predict([preprocessed_curr, np.array([input_actions])], batch_size=1)[0]
+            action_value = Q[idx-1]
+            action, action_idx = self.get_action_according_to_exploration_policy(action_value)
+            if idx < self.max_action_sequence_length:
+                input_actions[idx] = action_idx
+            actions += [action]
+            action_idxs += [action_idx]
+
+        return actions, action_idxs, np.max(Q) # send as a list of actions to conform with episodic experience replay
+
     def predict(self):
         """predict action according to the current state
 
         :return: the action, the action index, the mean Q value
         """
         # if no current state is present, create one by stacking the duplicated current state
+        if self.architecture == Architecture.SEQUENCE:
+            return self.predict_sequence()
+
         if self.preprocessed_curr == []:
             frame = self.environment.get_curr_state()
             preprocessed_frame = self.preprocess(frame)
@@ -452,45 +628,11 @@ class Agent(object):
             # expand dims to have a time dimension + switch between depth and time
             preprocessed_curr = np.expand_dims(preprocessed_curr, axis=0).transpose(0,2,1,3,4)
 
-        #display_state(preprocessed_curr[0])
-        if self.architecture == Architecture.SEQUENCE:
-            # predict an action sequence
-            action_sequence_idxs = np.array([self.start_token])
-            action_sequence = []
-            Qs = []
-            for i in range(self.max_action_sequence_length):
-                padded_action_sequence_idxs = pad_sequences([action_sequence_idxs],
-                                                            maxlen=(self.max_action_sequence_length+1),
-                                                            value=self.end_token,
-                                                            padding='post')
-                #print(padded_action_sequence_idxs)
-                Q = self.online_network.predict([preprocessed_curr, padded_action_sequence_idxs], batch_size=1)
-                Q = Q[0][len(action_sequence_idxs)]
-                #print(preprocessed_curr)
-                #print(self.online_network.predict([preprocessed_curr, padded_action_sequence_idxs], batch_size=1))
-                # stop if end token was sampled
-                #print(Q)
-                if np.argmax(Q) == self.end_token:
-                    break
-                action, action_idx = self.get_action_according_to_exploration_policy(Q)
-                action_sequence += [action]
-                action_sequence_idxs = np.append(action_sequence_idxs, [action_idx])
-                Qs += [np.mean(Q)]
-            if Qs == []:
-                action_sequence_idxs = np.array([self.start_token, 0])
-                action_sequence = [self.environment.actions[0], self.environment.actions[0]]
-                meanQ = 0 #TODO: this is wrong
-            else:
-                meanQ = np.mean(Qs)
+        # predict a single action
+        Q = self.online_network.predict(preprocessed_curr, batch_size=1)
+        action, action_idx = self.get_action_according_to_exploration_policy(Q)
 
-            return action_sequence, action_sequence_idxs[1:], meanQ
-        else:
-            # predict a single action
-
-            Q = self.online_network.predict(preprocessed_curr, batch_size=1)
-            action, action_idx = self.get_action_according_to_exploration_policy(Q)
-
-            return [action], [action_idx], np.mean(Q) # send as a list of actions to conform with episodic experience replay
+        return [action], [action_idx], np.max(Q) # send as a list of actions to conform with episodic experience replay
 
     def step(self, action, action_idx):
         # repeat action several times and stack the first frame onto the previous state
@@ -527,9 +669,21 @@ class Agent(object):
         self.curr_step += 1
 
         # update target network with online network once in a while
-        if self.curr_step % self.target_update_freq == 0:
-            print(">>> update the target")
-            self.target_network.set_weights(self.online_network.get_weights())
+        if self.incremental_target_update:
+            if self.curr_step % self.increment_each_num_steps == 0:
+                #print(">>> update the target")
+                online_weights = self.online_network.get_weights()
+                target_weights = self.target_network.get_weights()
+                for i in xrange(len(online_weights)):
+                    #print(online_weights[i].shape)
+                    #print(target_weights[i].shape)
+
+                    target_weights[i] = self.tau * online_weights[i] + (1 - self.tau) * target_weights[i]
+                self.target_network.set_weights(target_weights)
+        else:
+            if self.curr_step % self.target_update_freq == 0:
+                print(">>> update the target")
+                self.target_network.set_weights(self.online_network.get_weights())
 
         return reward, game_over
 
@@ -538,10 +692,8 @@ class Agent(object):
 
         :return: the train loss
         """
-        #print("getting batch")
         minibatch = self.memory.sample_minibatch(self.batch_size)
         inputs, targets, samples_weights, action_idxs = self.get_inputs_and_targets(minibatch)
-        #print("training")
         if self.memory.prioritized:
             return self.online_network.train_on_batch(inputs, targets, sample_weight=samples_weights)
         elif self.architecture == Architecture.SEQUENCE: # episodic
@@ -601,6 +753,9 @@ class ExperienceReplay(object):
     def get_last_record(self):
         return self.memory[-1]
 
+    def close_last_record(self):
+        self.get_last_record().finalize()
+
     def remember(self, transition, game_over):
         """Add a transition to the experience replay
 
@@ -619,8 +774,8 @@ class ExperienceReplay(object):
         else:
             self.get_last_record().add_transition(transition, game_over, transition_powered_priority)
         # finalize the record if necessary
-        if not self.store_episodes or (self.store_episodes and (game_over or transition.reward > 0 or True)): #TODO: this is wrong
-            self.get_last_record().finalize()
+        if not self.store_episodes or (self.store_episodes and (game_over or transition.reward > 0)): #TODO: this is wrong
+            self.close_last_record()
 
         # free some space (delete the oldest transition or episode)
         if len(self.memory) > self.max_memory:
@@ -655,6 +810,14 @@ class ExperienceReplay(object):
         else:
             indices = np.random.choice(len(self.memory), batch_size)
 
+        # TODO: this is just a simple test
+        #positives = [idx for idx, transition in enumerate(self.memory) if self.memory[idx].transition_list[-1].reward > 0]
+        #print(positives)
+        #print(np.random.choice(positives, batch_size/2))
+        #print(indices)
+        #indices = np.append(indices, np.random.choice(positives, batch_size/2))
+        #print(indices)
+
         minibatch = list()
         for idx in indices:
             while not_terminals and self.memory[idx].game_over:
@@ -669,6 +832,8 @@ class ExperienceReplay(object):
             for idx in range(len(minibatch)):
                 minibatch[idx][3] /= float(max_weight) # normalize weights relative to the minibatch
 
+        #print([record[0] for record in minibatch])
+        #print([idx for idx, transition in enumerate(self.memory) if self.memory[idx].transition_list[-1].reward > 0])
         #print(minibatch)
         return minibatch
 
@@ -885,8 +1050,6 @@ def run_experiment(args):
         while not game_over and steps < args["steps_per_episode"]:
             #print("predicting")
             actions, action_idxs, mean_Q = agent.predict()
-            #print("finished predicting")
-            print(action_idxs)
             for action, action_idx in zip(actions, action_idxs):
                 action_idx = int(action_idx)
                 next_state, reward, game_over = agent.step(action, action_idx)
@@ -1029,17 +1192,17 @@ if __name__ == "__main__":
 
         egreedy = {
             "snapshot_episodes": 100,
-            "episodes": 300,
-            "steps_per_episode": 4000, # 4300 for deathmatch, 300 for health gathering
+            "episodes": 400,
+            "steps_per_episode": 40, # 4300 for deathmatch, 300 for health gathering
             "average_over_num_episodes": 50,
-            "start_learning_after": 10,
+            "start_learning_after": 20,
             "algorithm": Algorithm.DDQN,
             "discount": 0.99,
             "max_memory": 1000,
             "prioritized_experience": False,
             "exploration_policy": ExplorationPolicy.E_GREEDY,
             "learning_rate": 2.5e-4,
-            "level": Level.DEFEND,
+            "level": Level.BASIC,
             "combine_actions": True,
             "temperature": 10,
             "batch_size": 10,
@@ -1052,17 +1215,17 @@ if __name__ == "__main__":
             "epsilon_start": 0.5,
             "epsilon_end": 0.01,
             "epsilon_annealing_steps": 3e4,
-            "architecture": Architecture.DUELING,
+            "architecture": Architecture.DIRECT,
             "max_action_sequence_length": 1
         }
 
         lstm = {
             "snapshot_episodes": 100,
-            "episodes": 300,
+            "episodes": 600,
             "steps_per_episode": 40, # 4300 for deathmatch, 300 for health gathering
             "average_over_num_episodes": 50,
             "start_learning_after": 10,
-            "algorithm": Algorithm.DQN,
+            "algorithm": Algorithm.DDQN,
             "discount": 0.99,
             "max_memory": 1000,
             "prioritized_experience": False,
@@ -1082,7 +1245,7 @@ if __name__ == "__main__":
             "epsilon_end": 0.01,
             "epsilon_annealing_steps": 3e4,
             "architecture": Architecture.SEQUENCE,
-            "max_action_sequence_length": 1
+            "max_action_sequence_length": 5
         }
 
         runs = [lstm]
