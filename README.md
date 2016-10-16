@@ -7,8 +7,10 @@ The features that were implemented are:
 - Double DQN
 - Prioritized Experience Replay
 - Next state prediction using autoencoder + GAN (WIP)
+- Next state prediction using VAE (WIP)
 - Exploration policies: e-greedy, softmax or shifted multinomial
-- Architectures: Sequential Q estimation, Inception Q estimation, Dueling Q estimation  
+- Architectures: Sequential Q estimation, Inception Q estimation, Dueling Q estimation
+- Macro-actions prediction using LSTM and n-step Q learning
 
 trained models are also supplied
 
