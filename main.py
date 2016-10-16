@@ -161,7 +161,7 @@ class Agent(object):
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.target_update_freq = target_update_freq
-        self.incremental_target_update = True
+        self.incremental_target_update = False
         self.increment_each_num_steps = 10
         self.tau = 30/float(self.target_update_freq)
 
@@ -348,6 +348,7 @@ class Agent(object):
                 exit()
         elif architecture == Architecture.SEQUENCE:
             print("Built a recurrent DQN")
+            """
             state_model = Sequential()
             state_model.add(Convolution2D(16, 3, 3, subsample=(2, 2), activation='relu',
                                     input_shape=(self.history_length, self.state_height, self.state_width),
@@ -369,6 +370,44 @@ class Agent(object):
             model.add(Merge([state_model, action_model], mode='concat', concat_axis=-1))
             model.add(LSTM(512, return_sequences=True, activation='relu', init='uniform'))
             model.add(TimeDistributed(Dense(len(self.environment.actions), init='uniform')))
+            model.compile(rmsprop(lr=self.learning_rate), "mse")
+            model.summary()
+            """
+            state_model_input = Input(shape=(self.history_length, self.state_height, self.state_width))
+            state_model = Convolution2D(16, 3, 3, subsample=(2, 2), activation='relu',
+                                          input_shape=(self.history_length, self.state_height, self.state_width),
+                                          init='uniform', trainable=True)(state_model_input)
+            state_model = Convolution2D(32, 3, 3, subsample=(2, 2), activation='relu', init='uniform', trainable=True)(state_model)
+            state_model = Convolution2D(64, 3, 3, subsample=(2, 2), activation='relu', init='uniform', trainable=True)(state_model)
+            state_model = Convolution2D(128, 3, 3, subsample=(1, 1), activation='relu', init='uniform')(state_model)
+            state_model = Convolution2D(256, 3, 3, subsample=(1, 1), activation='relu', init='uniform')(state_model)
+            state_model = Flatten()(state_model)
+            state_model = Dense(512, activation='relu', init='uniform')(state_model)
+            state_model = RepeatVector(self.max_action_sequence_length)(state_model)
+
+            action_model_input = Input(shape=(self.max_action_sequence_length,))
+            action_model = Masking(mask_value=self.end_token, input_shape=(self.max_action_sequence_length,))(action_model_input)
+            action_model = Embedding(input_dim=self.input_action_space_size, output_dim=100, init='uniform',
+                                       input_length=self.max_action_sequence_length)(action_model)
+            action_model = TimeDistributed(Dense(100, init='uniform', activation='relu'))(action_model)
+
+            x = merge([state_model, action_model], mode='concat', concat_axis=-1)
+            x = LSTM(512, return_sequences=True, activation='relu', init='uniform')(x)
+
+            # state value tower - V
+            state_value = TimeDistributed(Dense(256, activation='relu', init='uniform'))(x)
+            state_value = TimeDistributed(Dense(1, init='uniform'))(state_value)
+            state_value = Lambda(lambda s: K.repeat_elements(s,rep=len(self.environment.actions),axis=2))(state_value)
+
+            # action advantage tower - A
+            action_advantage = TimeDistributed(Dense(256, activation='relu', init='uniform'))(x)
+            action_advantage = TimeDistributed(Dense(len(self.environment.actions), init='uniform'))(action_advantage)
+            action_advantage = TimeDistributed(Lambda(lambda a: a - K.mean(a, keepdims=True, axis=-1)))(action_advantage)
+
+            # merge to state-action value function Q
+            state_action_value = merge([state_value, action_advantage], mode='sum')
+
+            model = Model(input=[state_model_input, action_model_input], output=state_action_value)
             model.compile(rmsprop(lr=self.learning_rate), "mse")
             model.summary()
 
@@ -599,6 +638,9 @@ class Agent(object):
         for idx in range(1,self.max_action_sequence_length+1):
             Q = self.online_network.predict([preprocessed_curr, np.array([input_actions])], batch_size=1)[0]
             action_value = Q[idx-1]
+            if idx > 1 and np.max(action_value) < last_max_Q:
+                break
+            last_max_Q = np.max(action_value)
             action, action_idx = self.get_action_according_to_exploration_policy(action_value)
             if idx < self.max_action_sequence_length:
                 input_actions[idx] = action_idx
@@ -1221,8 +1263,8 @@ if __name__ == "__main__":
 
         lstm = {
             "snapshot_episodes": 100,
-            "episodes": 600,
-            "steps_per_episode": 40, # 4300 for deathmatch, 300 for health gathering
+            "episodes": 6000,
+            "steps_per_episode": 400, # 4300 for deathmatch, 300 for health gathering
             "average_over_num_episodes": 50,
             "start_learning_after": 10,
             "algorithm": Algorithm.DDQN,
@@ -1231,7 +1273,7 @@ if __name__ == "__main__":
             "prioritized_experience": False,
             "exploration_policy": ExplorationPolicy.E_GREEDY,
             "learning_rate": 2.5e-4,
-            "level": Level.BASIC,
+            "level": Level.DEATHMATCH,
             "combine_actions": True,
             "temperature": 10,
             "batch_size": 10,
